@@ -151,57 +151,48 @@ jobs:
             nginx.prod.conf \
             ${{ env.VPS_USER }}@${{ env.VPS_HOST }}:/opt/ctx-quiz/
 
-      - name: 📤 Copy source code for build
+      - name: 📤 Build and transfer images
         run: |
-          # Create tarball of source code
-          tar -czf /tmp/ctx-quiz-src.tar.gz --exclude=node_modules --exclude=.git --exclude=coverage --exclude=dist backend frontend
-          scp -o StrictHostKeyChecking=no /tmp/ctx-quiz-src.tar.gz ${{ env.VPS_USER }}@${{ env.VPS_HOST }}:/tmp/
+          # Build images locally in GitHub Actions
+          echo "🏗️ Building backend image..."
+          docker build -t ctx-quiz-backend:latest ./backend
+          
+          echo "🏗️ Building frontend image..."
+          docker build \
+            --build-arg NEXT_PUBLIC_API_URL=https://${{ env.VPS_HOST }} \
+            --build-arg NEXT_PUBLIC_WS_URL=wss://${{ env.VPS_HOST }} \
+            -t ctx-quiz-frontend:latest ./frontend
+          
+          # Save and compress images
+          echo "📦 Saving images..."
+          docker save ctx-quiz-backend:latest | gzip > /tmp/backend.tar.gz
+          docker save ctx-quiz-frontend:latest | gzip > /tmp/frontend.tar.gz
+          
+          # Transfer to VPS
+          echo "📤 Transferring images to VPS..."
+          scp -o StrictHostKeyChecking=no /tmp/backend.tar.gz /tmp/frontend.tar.gz ${{ env.VPS_USER }}@${{ env.VPS_HOST }}:/tmp/
 
-      - name: 🚀 Build and Deploy on VPS
+      - name: 🚀 Deploy on VPS
         run: |
           ssh -o StrictHostKeyChecking=no ${{ env.VPS_USER }}@${{ env.VPS_HOST }} << 'EOF'
             set -e
             cd /opt/ctx-quiz
             
-            # Extract source code
-            mkdir -p /tmp/ctx-quiz-build
-            tar -xzf /tmp/ctx-quiz-src.tar.gz -C /tmp/ctx-quiz-build
+            # Load images
+            echo "📥 Loading backend image..."
+            gunzip -c /tmp/backend.tar.gz | docker load
             
-            # Build backend image
-            echo "🏗️ Building backend image..."
-            docker build -t ctx-quiz-backend:${{ steps.deploy_info.outputs.deployment_id }} /tmp/ctx-quiz-build/backend
-            docker tag ctx-quiz-backend:${{ steps.deploy_info.outputs.deployment_id }} ctx-quiz-backend:latest
+            echo "📥 Loading frontend image..."
+            gunzip -c /tmp/frontend.tar.gz | docker load
             
-            # Build frontend image
-            echo "🏗️ Building frontend image..."
-            docker build \
-              --build-arg NEXT_PUBLIC_API_URL=https://${{ env.DOMAIN }} \
-              --build-arg NEXT_PUBLIC_WS_URL=wss://${{ env.DOMAIN }} \
-              -t ctx-quiz-frontend:${{ steps.deploy_info.outputs.deployment_id }} /tmp/ctx-quiz-build/frontend
-            docker tag ctx-quiz-frontend:${{ steps.deploy_info.outputs.deployment_id }} ctx-quiz-frontend:latest
-            
-            # Update .env to use local images
-            cat > /opt/ctx-quiz/.env << 'ENVFILE'
-            BACKEND_IMAGE=ctx-quiz-backend:latest
-            FRONTEND_IMAGE=ctx-quiz-frontend:latest
-            DOMAIN=${{ env.DOMAIN }}
-            DATA_DIR=/opt/ctx-quiz/data
-            SSL_DIR=/opt/ctx-quiz/ssl
-            NODE_ENV=production
-            JWT_SECRET=${{ secrets.JWT_SECRET || 'ctx-quiz-prod-secret-change-me-2024' }}
-            MONGODB_URI=${{ secrets.MONGODB_URI || 'mongodb+srv://quizdb:9wpPQmEML1uqvXy0@quiz.lxlv4nr.mongodb.net/?appName=quiz' }}
-            MONGODB_DB_NAME=quiz_platform
-            REDIS_URL=redis://redis:6379
-            FRONTEND_URL=https://${{ env.DOMAIN }}
-            NEXT_PUBLIC_API_URL=https://${{ env.DOMAIN }}
-            NEXT_PUBLIC_WS_URL=wss://${{ env.DOMAIN }}
-          ENVFILE
+            # Cleanup temp files
+            rm -f /tmp/backend.tar.gz /tmp/frontend.tar.gz
             
             # Restart services
+            echo "🔄 Restarting services..."
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
             
-            # Cleanup
-            rm -rf /tmp/ctx-quiz-build /tmp/ctx-quiz-src.tar.gz
+            # Cleanup old images
             docker image prune -f
             
             echo "✅ Deployment complete!"
