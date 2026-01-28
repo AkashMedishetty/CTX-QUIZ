@@ -152,20 +152,14 @@ jobs:
             ${{ env.VPS_USER }}@${{ env.VPS_HOST }}:/opt/ctx-quiz/
 
       - name: 🚀 Execute Atomic Deployment
-        env:
-          DEPLOYMENT_ID: ${{ steps.deploy_info.outputs.deployment_id }}
-          IS_ROLLBACK: ${{ steps.deploy_info.outputs.is_rollback }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REGISTRY: ${{ env.REGISTRY }}
-          IMAGE_NAME: ${{ env.IMAGE_NAME }}
         run: |
-          ssh -o StrictHostKeyChecking=no ${{ env.VPS_USER }}@${{ env.VPS_HOST }} << 'DEPLOY_SCRIPT'
+          # First, login to GHCR on VPS
+          ssh -o StrictHostKeyChecking=no ${{ env.VPS_USER }}@${{ env.VPS_HOST }} "echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin"
+          
+          # Then execute deployment
+          ssh -o StrictHostKeyChecking=no ${{ env.VPS_USER }}@${{ env.VPS_HOST }} << EOF
             set -e
-            
             cd /opt/ctx-quiz
-            
-            # Login to GitHub Container Registry
-            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
             
             # Execute atomic deployment
             chmod +x deploy/atomic-deploy.sh
@@ -175,7 +169,7 @@ jobs:
               --image-name "${{ env.IMAGE_NAME }}" \
               --domain "${{ env.DOMAIN }}" \
               ${{ steps.deploy_info.outputs.is_rollback == 'true' && '--rollback' || '' }}
-          DEPLOY_SCRIPT
+          EOF
 
       - name: ✅ Verify Deployment
         run: |
