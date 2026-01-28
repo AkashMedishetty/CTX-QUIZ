@@ -1,0 +1,18 @@
+# SSL Certificate Directory
+
+This directory should contain your SSL certificates:
+- fullchain.pem - Your SSL certificate chain
+- privkey.pem - Your private key
+
+For development, you can generate self-signed certificates:
+```bash
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout ssl/privkey.pem \
+  -out ssl/fullchain.pem \
+  -subj "/C=US/ST=State/L=City/O=Organization/CN=localhost"
+```
+
+For production, use Let's Encrypt or a commercial certificate.
+See docs/ssl-setup.md for detailed instructions.
+
+DO NOT commit actual certificate files to version control!

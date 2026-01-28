@@ -1,0 +1,421 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ==================== CSS Variables ==================== */
+:root {
+  /* Primary Colors (CTX Teal) */
+  --primary: #275249;
+  --primary-light: #3a7a6d;
+  --primary-dark: #1a3832;
+  
+  /* Accent Colors (CTX Accent) */
+  --accent: #6B3093;
+  --accent-light: #8a4db8;
+  --accent-dark: #4d2269;
+  
+  /* Semantic Colors */
+  --success: #22C55E;
+  --error: #EF4444;
+  --warning: #F59E0B;
+  --info: #3B82F6;
+  
+  /* Neumorphism Colors (Light Mode) */
+  --neu-bg: #E8ECEF;
+  --neu-surface: #F0F4F7;
+  --shadow-dark: #C8CCD0;
+  --shadow-light: #FFFFFF;
+  
+  /* Text Colors */
+  --text-primary: #1a1d21;
+  --text-secondary: #4b5563;
+  --text-muted: #9ca3af;
+  
+  /* Border Colors */
+  --border: #d1d5db;
+  --border-focus: var(--primary);
+  
+  /* Fonts */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-display: 'Space Grotesk', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+  
+  /* Timing */
+  --duration-instant: 100ms;
+  --duration-fast: 200ms;
+  --duration-normal: 300ms;
+  --duration-slow: 500ms;
+  --duration-slower: 800ms;
+  
+  /* Easing */
+  --ease-out: cubic-bezier(0.0, 0.0, 0.2, 1);
+  --ease-in: cubic-bezier(0.4, 0.0, 1, 1);
+  --ease-in-out: cubic-bezier(0.4, 0.0, 0.2, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  
+  /* Border Radius */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+  --radius-full: 9999px;
+}
+
+/* Dark Mode Variables */
+.dark {
+  --neu-bg: #1A1D21;
+  --neu-surface: #22262B;
+  --shadow-dark: #0F1114;
+  --shadow-light: #2A2F35;
+  
+  --text-primary: #f9fafb;
+  --text-secondary: #d1d5db;
+  --text-muted: #6b7280;
+  
+  --border: #374151;
+  --border-focus: var(--primary-light);
+}
+
+/* ==================== Base Styles ==================== */
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  
+  html {
+    @apply antialiased;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+  
+  body {
+    @apply font-sans text-body;
+    background-color: var(--neu-bg);
+    color: var(--text-primary);
+    min-height: 100vh;
+  }
+  
+  /* Headings */
+  h1 {
+    @apply text-h1 font-semibold tracking-tight;
+  }
+  
+  h2 {
+    @apply text-h2 font-semibold tracking-tight;
+  }
+  
+  h3 {
+    @apply text-h3 font-medium;
+  }
+  
+  /* Focus styles */
+  :focus-visible {
+    @apply outline-none ring-2 ring-primary ring-offset-2;
+    ring-offset-color: var(--neu-bg);
+  }
+  
+  /* Selection */
+  ::selection {
+    background-color: var(--primary);
+    color: white;
+  }
+}
+
+/* ==================== Neumorphic Utilities ==================== */
+@layer utilities {
+  /* Neumorphic raised effect */
+  .neu-raised {
+    box-shadow: 8px 8px 16px var(--shadow-dark), -8px -8px 16px var(--shadow-light);
+    background-color: var(--neu-bg);
+  }
+  
+  .neu-raised-lg {
+    box-shadow: 12px 12px 24px var(--shadow-dark), -12px -12px 24px var(--shadow-light);
+    background-color: var(--neu-bg);
+  }
+  
+  .neu-raised-sm {
+    box-shadow: 4px 4px 8px var(--shadow-dark), -4px -4px 8px var(--shadow-light);
+    background-color: var(--neu-bg);
+  }
+  
+  /* Neumorphic pressed/inset effect */
+  .neu-pressed {
+    box-shadow: inset 4px 4px 8px var(--shadow-dark), inset -4px -4px 8px var(--shadow-light);
+    background-color: var(--neu-bg);
+  }
+  
+  .neu-pressed-sm {
+    box-shadow: inset 2px 2px 4px var(--shadow-dark), inset -2px -2px 4px var(--shadow-light);
+    background-color: var(--neu-bg);
+  }
+  
+  /* Neumorphic surface (elevated card) */
+  .neu-surface {
+    background-color: var(--neu-surface);
+    box-shadow: 8px 8px 16px var(--shadow-dark), -8px -8px 16px var(--shadow-light);
+  }
+  
+  /* Neumorphic flat (for hover states) */
+  .neu-flat {
+    box-shadow: none;
+    background-color: var(--neu-bg);
+  }
+  
+  /* Text balance */
+  .text-balance {
+    text-wrap: balance;
+  }
+  
+  /* Touch-friendly minimum size */
+  .touch-target {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  
+  /* Gradient text */
+  .gradient-text {
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
+  }
+  
+  /* Hide scrollbar but keep functionality */
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+  
+  /* Custom scrollbar */
+  .scrollbar-custom {
+    scrollbar-width: thin;
+    scrollbar-color: var(--shadow-dark) transparent;
+  }
+  
+  .scrollbar-custom::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  
+  .scrollbar-custom::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  
+  .scrollbar-custom::-webkit-scrollbar-thumb {
+    background-color: var(--shadow-dark);
+    border-radius: 4px;
+  }
+  
+  .scrollbar-custom::-webkit-scrollbar-thumb:hover {
+    background-color: var(--text-muted);
+  }
+}
+
+/* ==================== Component Styles ==================== */
+@layer components {
+  /* Card component */
+  .card {
+    @apply neu-raised rounded-lg p-6;
+  }
+  
+  .card-lg {
+    @apply neu-raised-lg rounded-xl p-8;
+  }
+  
+  /* Input base styles */
+  .input-base {
+    @apply neu-pressed rounded-md px-4 py-3 w-full;
+    @apply text-body placeholder:text-muted;
+    @apply transition-all duration-fast;
+    @apply focus:ring-2 focus:ring-primary focus:ring-offset-2;
+    ring-offset-color: var(--neu-bg);
+  }
+  
+  /* Button base styles */
+  .btn-base {
+    @apply inline-flex items-center justify-center;
+    @apply font-medium rounded-md;
+    @apply transition-all duration-fast;
+    @apply touch-target;
+    @apply disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+}
+
+/* ==================== Animation Utilities ==================== */
+@layer utilities {
+  /* Reduced motion support */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+/* ==================== Mobile-First Responsive Utilities ==================== */
+@layer utilities {
+  /* Safe area insets for notched devices (iPhone X+, etc.) */
+  .safe-area-inset-top {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+  
+  .safe-area-inset-bottom {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  
+  .safe-area-inset-left {
+    padding-left: env(safe-area-inset-left, 0px);
+  }
+  
+  .safe-area-inset-right {
+    padding-right: env(safe-area-inset-right, 0px);
+  }
+  
+  .safe-area-inset-x {
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
+  }
+  
+  .safe-area-inset-y {
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  
+  /* Minimum touch target size (44px as per Apple HIG) */
+  .touch-target-44 {
+    min-height: 44px;
+    min-width: 44px;
+  }
+  
+  .touch-target-48 {
+    min-height: 48px;
+    min-width: 48px;
+  }
+  
+  /* Touch action utilities for preventing unwanted gestures */
+  .touch-action-none {
+    touch-action: none;
+  }
+  
+  .touch-action-pan-x {
+    touch-action: pan-x;
+  }
+  
+  .touch-action-pan-y {
+    touch-action: pan-y;
+  }
+  
+  .touch-action-manipulation {
+    touch-action: manipulation;
+  }
+  
+  /* Prevent text selection on interactive elements */
+  .select-none-touch {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+  
+  /* Prevent pull-to-refresh on mobile */
+  .overscroll-none {
+    overscroll-behavior: none;
+  }
+  
+  .overscroll-contain {
+    overscroll-behavior: contain;
+  }
+  
+  /* Active state for touch feedback */
+  .touch-active:active {
+    transform: scale(0.98);
+    opacity: 0.9;
+  }
+  
+  /* Mobile-optimized text sizes */
+  .text-mobile-body {
+    font-size: 16px; /* Prevents iOS zoom on input focus */
+    line-height: 1.5;
+  }
+  
+  .text-mobile-lg {
+    font-size: 18px;
+    line-height: 1.5;
+  }
+  
+  /* CSS containment for performance */
+  .contain-layout {
+    contain: layout;
+  }
+  
+  .contain-paint {
+    contain: paint;
+  }
+  
+  .contain-strict {
+    contain: strict;
+  }
+  
+  .contain-content {
+    contain: content;
+  }
+  
+  /* GPU acceleration for smooth animations */
+  .gpu-accelerated {
+    transform: translateZ(0);
+    will-change: transform;
+  }
+  
+  /* Tap highlight removal for custom touch feedback */
+  .tap-highlight-none {
+    -webkit-tap-highlight-color: transparent;
+  }
+  
+  /* Mobile viewport height fix (accounts for browser chrome) */
+  .h-screen-mobile {
+    height: 100vh;
+    height: 100dvh; /* Dynamic viewport height */
+  }
+  
+  .min-h-screen-mobile {
+    min-height: 100vh;
+    min-height: 100dvh;
+  }
+  
+  /* Spacing utilities for small screens (320px-428px) */
+  @media (max-width: 428px) {
+    .mobile-px-compact {
+      padding-left: 12px;
+      padding-right: 12px;
+    }
+    
+    .mobile-py-compact {
+      padding-top: 12px;
+      padding-bottom: 12px;
+    }
+    
+    .mobile-gap-compact {
+      gap: 8px;
+    }
+  }
+  
+  /* Extra small screen adjustments (320px) */
+  @media (max-width: 360px) {
+    .xs-text-sm {
+      font-size: 14px;
+    }
+    
+    .xs-px-tight {
+      padding-left: 8px;
+      padding-right: 8px;
+    }
+  }
+}
+
+/* ==================== Font Loading ==================== */
+/* Import fonts from Google Fonts */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap');

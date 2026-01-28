@@ -1,0 +1,231 @@
+# =============================================================================
+# CTX Quiz - Atomic Deployment Pipeline
+# =============================================================================
+# Vercel-like deployment with:
+# - Unique deployment IDs
+# - Instant rollbacks
+# - Zero-downtime deployments
+# - Automatic SSL certificates
+# =============================================================================
+
+name: 🚀 Deploy CTX Quiz
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      rollback_to:
+        description: 'Deployment ID to rollback to (leave empty for new deployment)'
+        required: false
+        default: ''
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  VPS_HOST: 103.194.228.51
+  VPS_USER: root
+  DOMAIN: vm701294211.manageserver.in
+
+jobs:
+  # ===========================================================================
+  # Build and Test
+  # ===========================================================================
+  build:
+    name: 🔨 Build & Test
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.rollback_to == '' }}
+    outputs:
+      deployment_id: ${{ steps.deployment_id.outputs.id }}
+      backend_image: ${{ steps.meta-backend.outputs.tags }}
+      frontend_image: ${{ steps.meta-frontend.outputs.tags }}
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🏷️ Generate Deployment ID
+        id: deployment_id
+        run: |
+          DEPLOY_ID="deploy-$(date +%Y%m%d-%H%M%S)-${GITHUB_SHA::8}"
+          echo "id=$DEPLOY_ID" >> $GITHUB_OUTPUT
+          echo "🚀 Deployment ID: $DEPLOY_ID"
+
+      - name: 🐳 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 🔐 Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 📝 Extract metadata (Backend)
+        id: meta-backend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/backend
+          tags: |
+            type=raw,value=${{ steps.deployment_id.outputs.id }}
+            type=raw,value=latest
+
+      - name: 📝 Extract metadata (Frontend)
+        id: meta-frontend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/frontend
+          tags: |
+            type=raw,value=${{ steps.deployment_id.outputs.id }}
+            type=raw,value=latest
+
+      - name: 🏗️ Build and push Backend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: ${{ steps.meta-backend.outputs.tags }}
+          labels: ${{ steps.meta-backend.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 🏗️ Build and push Frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: ${{ steps.meta-frontend.outputs.tags }}
+          labels: ${{ steps.meta-frontend.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            NEXT_PUBLIC_API_URL=https://${{ env.DOMAIN }}
+            NEXT_PUBLIC_WS_URL=wss://${{ env.DOMAIN }}
+
+  # ===========================================================================
+  # Deploy to VPS
+  # ===========================================================================
+  deploy:
+    name: 🚀 Deploy to VPS
+    runs-on: ubuntu-latest
+    needs: build
+    if: ${{ always() && (needs.build.result == 'success' || github.event.inputs.rollback_to != '') }}
+    environment:
+      name: production
+      url: https://${{ env.DOMAIN }}
+    
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🔑 Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ env.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: 🔄 Determine Deployment
+        id: deploy_info
+        run: |
+          if [ -n "${{ github.event.inputs.rollback_to }}" ]; then
+            echo "deployment_id=${{ github.event.inputs.rollback_to }}" >> $GITHUB_OUTPUT
+            echo "is_rollback=true" >> $GITHUB_OUTPUT
+            echo "🔄 Rolling back to: ${{ github.event.inputs.rollback_to }}"
+          else
+            echo "deployment_id=${{ needs.build.outputs.deployment_id }}" >> $GITHUB_OUTPUT
+            echo "is_rollback=false" >> $GITHUB_OUTPUT
+            echo "🚀 New deployment: ${{ needs.build.outputs.deployment_id }}"
+          fi
+
+      - name: 📤 Copy deployment files
+        run: |
+          scp -o StrictHostKeyChecking=no -r \
+            deploy/ \
+            docker-compose.prod.yml \
+            nginx.prod.conf \
+            ${{ env.VPS_USER }}@${{ env.VPS_HOST }}:/opt/ctx-quiz/
+
+      - name: 🚀 Execute Atomic Deployment
+        env:
+          DEPLOYMENT_ID: ${{ steps.deploy_info.outputs.deployment_id }}
+          IS_ROLLBACK: ${{ steps.deploy_info.outputs.is_rollback }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ env.VPS_USER }}@${{ env.VPS_HOST }} << 'DEPLOY_SCRIPT'
+            set -e
+            
+            cd /opt/ctx-quiz
+            
+            # Login to GitHub Container Registry
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            
+            # Execute atomic deployment
+            chmod +x deploy/atomic-deploy.sh
+            ./deploy/atomic-deploy.sh \
+              --deployment-id "${{ steps.deploy_info.outputs.deployment_id }}" \
+              --registry "${{ env.REGISTRY }}" \
+              --image-name "${{ env.IMAGE_NAME }}" \
+              --domain "${{ env.DOMAIN }}" \
+              ${{ steps.deploy_info.outputs.is_rollback == 'true' && '--rollback' || '' }}
+          DEPLOY_SCRIPT
+
+      - name: ✅ Verify Deployment
+        run: |
+          echo "⏳ Waiting for services to be ready..."
+          sleep 30
+          
+          # Health check
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://${{ env.DOMAIN }}/api/health || echo "000")
+          
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "✅ Deployment successful! Health check passed."
+          else
+            echo "❌ Health check failed with status: $HTTP_STATUS"
+            exit 1
+          fi
+
+      - name: 📊 Create Deployment Record
+        if: success()
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ env.VPS_USER }}@${{ env.VPS_HOST }} << 'EOF'
+            cd /opt/ctx-quiz
+            ./deploy/record-deployment.sh \
+              "${{ steps.deploy_info.outputs.deployment_id }}" \
+              "${{ github.sha }}" \
+              "${{ github.actor }}" \
+              "success"
+          EOF
+
+      - name: 🔄 Auto-Rollback on Failure
+        if: failure()
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ env.VPS_USER }}@${{ env.VPS_HOST }} << 'EOF'
+            cd /opt/ctx-quiz
+            echo "❌ Deployment failed, initiating auto-rollback..."
+            ./deploy/atomic-deploy.sh --rollback-to-previous
+          EOF
+
+  # ===========================================================================
+  # Notify
+  # ===========================================================================
+  notify:
+    name: 📢 Notify
+    runs-on: ubuntu-latest
+    needs: [build, deploy]
+    if: always()
+    
+    steps:
+      - name: 📊 Deployment Summary
+        run: |
+          echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Deployment ID | \`${{ needs.build.outputs.deployment_id || github.event.inputs.rollback_to }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | ${{ needs.deploy.result == 'success' && '✅ Success' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| URL | https://${{ env.DOMAIN }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Actor | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY

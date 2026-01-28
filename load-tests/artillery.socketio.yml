@@ -1,0 +1,102 @@
+# Artillery Socket.IO Load Test Configuration
+# 
+# This configuration uses the Socket.IO engine for more accurate
+# WebSocket testing with proper Socket.IO protocol handling.
+#
+# Requirements: 11.1, 11.2
+#
+# Usage:
+#   TEST_SESSION_ID="your-session-id" artillery run load-tests/artillery.socketio.yml
+
+config:
+  target: "http://localhost:3001"
+  
+  # Socket.IO specific configuration
+  socketio:
+    # Use WebSocket transport only (no polling fallback)
+    transports:
+      - websocket
+    # Socket.IO path
+    path: /socket.io
+    # Disable reconnection for load testing
+    reconnection: false
+    # Connection timeout
+    timeout: 10000
+    # Query parameters for authentication
+    query:
+      role: participant
+      
+  # Test phases for 500 concurrent users
+  phases:
+    # Phase 1: Warm-up
+    - name: "Warm-up"
+      duration: 30
+      arrivalRate: 10
+      
+    # Phase 2: Ramp to target
+    - name: "Ramp to 500"
+      duration: 60
+      arrivalRate: 20
+      rampTo: 100
+      
+    # Phase 3: Sustained load
+    - name: "Sustained 500"
+      duration: 120
+      arrivalRate: 100
+      
+    # Phase 4: Cool-down
+    - name: "Cool-down"
+      duration: 30
+      arrivalRate: 50
+      rampTo: 10
+
+  # Environment variables
+  variables:
+    sessionId: "{{ $processEnvironment.TEST_SESSION_ID }}"
+    
+  # Performance thresholds
+  ensure:
+    - p95: 100
+    - p99: 200
+    - maxErrorRate: 1
+
+scenarios:
+  # Main participant scenario
+  - name: "Participant Session"
+    engine: socketio
+    flow:
+      # Connect and authenticate
+      - emit:
+          channel: "authenticate"
+          data:
+            sessionId: "{{ sessionId }}"
+            role: "participant"
+            nickname: "LoadTest_{{ $randomNumber(1, 99999) }}"
+            
+      # Wait for authentication
+      - think: 2
+      
+      # Listen for events and respond
+      - loop:
+          # Wait for question (simulated)
+          - think:
+              min: 3
+              max: 8
+              
+          # Submit answer
+          - emit:
+              channel: "submit_answer"
+              data:
+                questionId: "{{ $randomUUID() }}"
+                selectedOptions:
+                  - "{{ $randomUUID() }}"
+                clientTimestamp: "{{ $timestamp }}"
+                
+          # Wait for next question
+          - think:
+              min: 2
+              max: 5
+        count: 5
+        
+      # Graceful disconnect
+      - think: 2

@@ -1,0 +1,132 @@
+# Artillery Stress Test Configuration
+# 
+# Stress test to find system limits beyond 500 users.
+# Tests with up to 1000 concurrent users.
+#
+# WARNING: This test may cause system instability.
+# Only run on dedicated test environments.
+#
+# Usage:
+#   npm run load-test:stress
+#   artillery run load-tests/artillery.stress.yml
+
+config:
+  target: "http://localhost:3001"
+  
+  socketio:
+    transports:
+      - websocket
+    path: /socket.io
+    reconnection: false
+    
+  phases:
+    # Warm-up
+    - name: "Warm-up"
+      duration: 30
+      arrivalRate: 10
+      rampTo: 50
+      
+    # Ramp to 500 users (target capacity)
+    - name: "Ramp to Target"
+      duration: 60
+      arrivalRate: 50
+      rampTo: 150
+      
+    # Sustained at target
+    - name: "Sustained at Target"
+      duration: 120
+      arrivalRate: 150
+      
+    # Push beyond target to 1000 users
+    - name: "Stress Beyond Target"
+      duration: 60
+      arrivalRate: 200
+      rampTo: 300
+      
+    # Peak stress
+    - name: "Peak Stress"
+      duration: 30
+      arrivalRate: 300
+      
+    # Recovery test
+    - name: "Recovery"
+      duration: 60
+      arrivalRate: 100
+      rampTo: 50
+      
+    # Cool-down
+    - name: "Cool-down"
+      duration: 30
+      arrivalRate: 50
+      rampTo: 10
+
+  variables:
+    sessionId: "{{ $processEnvironment.TEST_SESSION_ID }}"
+    
+  # Relaxed thresholds for stress testing
+  ensure:
+    - p95: 200    # Allow higher latency under stress
+    - p99: 500
+    - maxErrorRate: 5  # Allow up to 5% errors
+
+  payload:
+    - path: "./data/nicknames.csv"
+      fields:
+        - "nickname"
+      loadAll: true
+
+  processor: "./processors/quiz-processor.js"
+
+scenarios:
+  - name: "Participant Stress"
+    weight: 85
+    engine: socketio
+    flow:
+      - emit:
+          channel: "authenticate"
+          data:
+            sessionId: "{{ sessionId }}"
+            role: "participant"
+            nickname: "{{ nickname }}"
+            
+      - think: 1
+      
+      - loop:
+          - think: 
+              min: 1
+              max: 3
+          - emit:
+              channel: "submit_answer"
+              data:
+                questionId: "{{ $randomUUID() }}"
+                selectedOptions:
+                  - "{{ $randomUUID() }}"
+                clientTimestamp: "{{ $timestamp }}"
+          - think: 1
+        count: 5
+        
+      - think: 1
+
+  - name: "Thundering Herd Stress"
+    weight: 15
+    engine: socketio
+    flow:
+      - emit:
+          channel: "authenticate"
+          data:
+            sessionId: "{{ sessionId }}"
+            role: "participant"
+            nickname: "{{ nickname }}"
+            
+      # Minimal think time to create thundering herd
+      - think: 0.5
+      
+      - emit:
+          channel: "submit_answer"
+          data:
+            questionId: "{{ $randomUUID() }}"
+            selectedOptions:
+              - "{{ $randomUUID() }}"
+            clientTimestamp: "{{ $timestamp }}"
+            
+      - think: 0.5

@@ -1,0 +1,98 @@
+# Artillery Light Load Test Configuration
+# 
+# A lighter load test for development and CI/CD pipelines.
+# Tests with 100 concurrent users.
+#
+# Usage:
+#   npm run load-test:light
+#   artillery run load-tests/artillery.light.yml
+
+config:
+  target: "http://localhost:3001"
+  
+  socketio:
+    transports:
+      - websocket
+    path: /socket.io
+    reconnection: false
+    
+  phases:
+    # Quick warm-up
+    - name: "Warm-up"
+      duration: 10
+      arrivalRate: 5
+      
+    # Ramp to 100 users
+    - name: "Ramp-up"
+      duration: 20
+      arrivalRate: 10
+      rampTo: 50
+      
+    # Sustained load
+    - name: "Sustained"
+      duration: 60
+      arrivalRate: 50
+      
+    # Cool-down
+    - name: "Cool-down"
+      duration: 10
+      arrivalRate: 20
+      rampTo: 5
+
+  variables:
+    sessionId: "{{ $processEnvironment.TEST_SESSION_ID }}"
+    
+  ensure:
+    - p95: 100
+    - p99: 200
+    - maxErrorRate: 2
+
+  payload:
+    - path: "./data/nicknames.csv"
+      fields:
+        - "nickname"
+      loadAll: true
+
+  processor: "./processors/quiz-processor.js"
+
+scenarios:
+  - name: "Participant Flow"
+    weight: 90
+    engine: socketio
+    flow:
+      - emit:
+          channel: "authenticate"
+          data:
+            sessionId: "{{ sessionId }}"
+            role: "participant"
+            nickname: "{{ nickname }}"
+            
+      - think: 1
+      
+      - loop:
+          - think: 
+              min: 2
+              max: 4
+          - emit:
+              channel: "submit_answer"
+              data:
+                questionId: "{{ $randomUUID() }}"
+                selectedOptions:
+                  - "{{ $randomUUID() }}"
+                clientTimestamp: "{{ $timestamp }}"
+          - think: 1
+        count: 3
+        
+      - think: 2
+
+  - name: "Controller"
+    weight: 10
+    engine: socketio
+    flow:
+      - emit:
+          channel: "authenticate"
+          data:
+            sessionId: "{{ sessionId }}"
+            role: "controller"
+            
+      - think: 30

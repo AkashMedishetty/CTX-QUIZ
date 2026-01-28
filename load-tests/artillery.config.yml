@@ -1,0 +1,192 @@
+# Artillery Load Test Configuration for Live Quiz Platform
+# 
+# This configuration tests the WebSocket server's ability to handle
+# 500+ concurrent connections with realistic user behavior.
+#
+# Requirements: 11.1, 11.2
+# - Support 500 concurrent WebSocket connections on 2GB RAM, 2 vCPU VPS
+# - Maintain connection latency below 100ms under normal load
+#
+# Usage:
+#   npm run load-test              # Run default load test (500 users)
+#   npm run load-test:light        # Run light load test (100 users)
+#   npm run load-test:stress       # Run stress test (1000 users)
+#
+# Prerequisites:
+#   1. Backend server running on localhost:3001
+#   2. MongoDB and Redis services available
+#   3. A test quiz session created (use the setup script)
+
+config:
+  target: "http://localhost:3001"
+  
+  # Socket.IO engine configuration
+  socketio:
+    transports:
+      - websocket
+    path: /socket.io
+    reconnection: false
+    
+  # Test phases - ramp up to 500 concurrent users
+  phases:
+    # Phase 1: Warm-up (30 seconds)
+    - name: "Warm-up"
+      duration: 30
+      arrivalRate: 5
+      rampTo: 20
+      
+    # Phase 2: Ramp-up to target load (60 seconds)
+    - name: "Ramp-up"
+      duration: 60
+      arrivalRate: 20
+      rampTo: 100
+      
+    # Phase 3: Sustained load at 500 concurrent (120 seconds)
+    - name: "Sustained Load"
+      duration: 120
+      arrivalRate: 100
+      
+    # Phase 4: Peak load spike (30 seconds)
+    - name: "Peak Load"
+      duration: 30
+      arrivalRate: 150
+      
+    # Phase 5: Cool-down (30 seconds)
+    - name: "Cool-down"
+      duration: 30
+      arrivalRate: 50
+      rampTo: 10
+
+  # Variables for test scenarios
+  variables:
+    sessionId: "{{ $processEnvironment.TEST_SESSION_ID }}"
+    
+  # Plugins for enhanced metrics
+  plugins:
+    expect: {}
+    metrics-by-endpoint: {}
+    
+  # Custom metrics thresholds
+  ensure:
+    # Latency requirements (Requirement 11.2)
+    - p95: 100    # 95th percentile latency < 100ms
+    - p99: 200    # 99th percentile latency < 200ms
+    - maxErrorRate: 1  # Max 1% error rate
+
+  # Payload configuration
+  payload:
+    - path: "./data/nicknames.csv"
+      fields:
+        - "nickname"
+      loadAll: true
+      
+  # HTTP defaults for REST API calls
+  http:
+    timeout: 10
+    
+  # Processor for custom functions
+  processor: "./processors/quiz-processor.js"
+
+# Test scenarios
+scenarios:
+  # Scenario 1: Participant Join and Answer Flow
+  # Simulates a participant joining a quiz session and submitting answers
+  - name: "Participant Quiz Flow"
+    weight: 80  # 80% of virtual users
+    engine: socketio
+    flow:
+      # Step 1: Connect to WebSocket server
+      - emit:
+          channel: "authenticate"
+          data:
+            sessionId: "{{ sessionId }}"
+            role: "participant"
+            nickname: "{{ nickname }}"
+            
+      # Step 2: Wait for authentication response
+      - think: 1
+      
+      # Step 3: Listen for quiz events
+      - loop:
+          - think: 
+              min: 2
+              max: 5
+          # Simulate answer submission when question is active
+          - emit:
+              channel: "submit_answer"
+              data:
+                questionId: "{{ $randomUUID() }}"
+                selectedOptions:
+                  - "{{ $randomUUID() }}"
+                clientTimestamp: "{{ $timestamp }}"
+          - think:
+              min: 1
+              max: 3
+        count: 5  # Answer 5 questions
+        
+      # Step 4: Disconnect gracefully
+      - think: 2
+
+  # Scenario 2: Controller Connection
+  # Simulates a controller monitoring the quiz
+  - name: "Controller Monitor"
+    weight: 5  # 5% of virtual users
+    engine: socketio
+    flow:
+      - emit:
+          channel: "authenticate"
+          data:
+            sessionId: "{{ sessionId }}"
+            role: "controller"
+            
+      - think: 2
+      
+      # Controller stays connected and monitors
+      - loop:
+          - think: 10
+        count: 12  # Stay connected for ~2 minutes
+        
+  # Scenario 3: Big Screen Connection
+  # Simulates big screen displays
+  - name: "Big Screen Display"
+    weight: 5  # 5% of virtual users
+    engine: socketio
+    flow:
+      - emit:
+          channel: "authenticate"
+          data:
+            sessionId: "{{ sessionId }}"
+            role: "bigscreen"
+            
+      - think: 2
+      
+      # Big screen stays connected
+      - loop:
+          - think: 15
+        count: 8  # Stay connected for ~2 minutes
+
+  # Scenario 4: Thundering Herd Simulation
+  # Simulates 500+ participants submitting answers simultaneously
+  - name: "Thundering Herd"
+    weight: 10  # 10% of virtual users
+    engine: socketio
+    flow:
+      - emit:
+          channel: "authenticate"
+          data:
+            sessionId: "{{ sessionId }}"
+            role: "participant"
+            nickname: "{{ nickname }}"
+            
+      - think: 1
+      
+      # All users submit at roughly the same time
+      - emit:
+          channel: "submit_answer"
+          data:
+            questionId: "{{ $randomUUID() }}"
+            selectedOptions:
+              - "{{ $randomUUID() }}"
+            clientTimestamp: "{{ $timestamp }}"
+            
+      - think: 1
