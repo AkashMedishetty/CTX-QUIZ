@@ -290,9 +290,9 @@ function EndedScreen({
   React.useEffect(() => {
     const fetchAnswerHistory = async () => {
       try {
-        const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001';
+        const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api';
         const response = await fetch(
-          `${backendUrl}/api/sessions/${sessionId}/participants/${participantId}/answers`
+          `${apiUrl}/sessions/${sessionId}/participants/${participantId}/answers`
         );
         
         if (response.ok) {

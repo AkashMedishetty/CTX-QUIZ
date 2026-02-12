@@ -600,8 +600,8 @@ export default function SessionsPage() {
   };
 
   const handleExportSubmit = async (sessionId: string, format: ExportFormat): Promise<Blob> => {
-    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001';
-    const response = await fetch(`${backendUrl}/api/sessions/${sessionId}/export?format=${format}`, {
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api';
+    const response = await fetch(`${apiUrl}/sessions/${sessionId}/export?format=${format}`, {
       method: 'POST',
     });
     

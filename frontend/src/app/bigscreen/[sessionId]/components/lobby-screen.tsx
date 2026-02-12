@@ -56,9 +56,14 @@ export interface LobbyScreenProps {
 const MAX_VISIBLE_PARTICIPANTS = 50;
 
 /**
- * Join URL base
+ * Join URL base - uses the current origin in browser, falls back to env var or ctx.works
  */
-const JOIN_URL_BASE = 'https://ctx.works/join';
+function getJoinUrlBase(): string {
+  if (typeof window !== 'undefined') {
+    return `${window.location.origin}/join`;
+  }
+  return `${process.env.NEXT_PUBLIC_API_URL?.replace('/api', '') || 'https://ctx.works'}/join`;
+}
 
 /**
  * LobbyScreen component
@@ -77,7 +82,8 @@ export function LobbyScreen({
   tournamentInfo,
 }: LobbyScreenProps) {
   // Generate join URL
-  const joinUrl = `${JOIN_URL_BASE}/${joinCode}`;
+  const joinUrlBase = getJoinUrlBase();
+  const joinUrl = `${joinUrlBase}/${joinCode}`;
 
   // Limit visible participants
   const visibleParticipants = useMemo(() => {
@@ -168,7 +174,7 @@ export function LobbyScreen({
               </div>
             </div>
             <p className="text-xs md:text-sm lg:text-body text-[var(--text-muted)] mt-2 md:mt-3 lg:mt-4">
-              {JOIN_URL_BASE.replace('https://', '')}
+              {joinUrlBase.replace('https://', '')}
             </p>
           </div>
 
