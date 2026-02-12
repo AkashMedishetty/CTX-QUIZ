@@ -5,11 +5,30 @@ const nextConfig = {
   // Enable standalone output for Docker deployment
   output: 'standalone',
   images: {
-    domains: ['localhost', 'vm701294211.manageserver.in'],
+    remotePatterns: [
+      {
+        protocol: 'http',
+        hostname: 'localhost',
+      },
+      {
+        protocol: 'https',
+        hostname: 'vm701294211.manageserver.in',
+      },
+    ],
     formats: ['image/avif', 'image/webp'],
   },
   experimental: {
     optimizePackageImports: ['framer-motion'],
+  },
+  // Proxy /uploads to backend so uploaded images resolve correctly
+  async rewrites() {
+    const backendUrl = process.env.NEXT_PUBLIC_API_URL?.replace('/api', '') || 'http://localhost:3001';
+    return [
+      {
+        source: '/uploads/:path*',
+        destination: `${backendUrl}/uploads/:path*`,
+      },
+    ];
   },
   webpack: (config) => {
     config.externals.push({

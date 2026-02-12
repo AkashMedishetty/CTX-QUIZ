@@ -34,6 +34,8 @@ interface ScoreCalculation {
   speedBonus: number;
   streakBonus: number;
   partialCredit: number;
+  /** Negative marking deduction for incorrect answers */
+  negativeDeduction: number;
   totalPoints: number;
   isCorrect: boolean;
 }
@@ -72,13 +74,15 @@ class ScoringService {
   /**
    * Start the scoring worker
    * 
-   * Subscribes to all session scoring channels and processes score calculations
+   * Creates a dedicated Redis subscriber to avoid message handler conflicts
+   * with other services (e.g., pubSubService) that share the default subscriber.
    */
   async start(): Promise<void> {
     console.log('[Scoring Service] Starting scoring worker...');
 
-    // Get subscriber instance
-    this.subscriber = redisService.getSubscriber();
+    // Create a dedicated subscriber so scoring messages are isolated
+    // from other pub/sub traffic (system_metrics, state changes, etc.)
+    this.subscriber = await redisService.createDedicatedSubscriber('scoring');
 
     // Set up message handler
     this.subscriber.on('message', async (_channel: string, message: string) => {
@@ -235,6 +239,7 @@ class ScoringService {
         speedBonusApplied: scoreCalculation.speedBonus,
         streakBonusApplied: scoreCalculation.streakBonus,
         partialCreditApplied: scoreCalculation.partialCredit > 0,
+        negativeDeductionApplied: scoreCalculation.negativeDeduction,
       };
 
       this.answerBatch.push(enrichedAnswer);
@@ -243,6 +248,13 @@ class ScoringService {
       if (this.answerBatch.length >= this.BATCH_SIZE) {
         await this.flushAnswerBatch();
       }
+
+      // Broadcast answer result to participant (for personal result display)
+      await this.broadcastAnswerResult(
+        scoringMessage!.participantId,
+        scoringMessage!.questionId,
+        scoreCalculation
+      );
 
       // Broadcast score update to participant
       await this.broadcastScoreUpdate(
@@ -349,6 +361,7 @@ class ScoringService {
         speedBonus: 0,
         streakBonus: 0,
         partialCredit: 0,
+        negativeDeduction: 0,
         totalPoints: 0,
         isCorrect: false,
       };
@@ -497,16 +510,32 @@ class ScoringService {
         sessionId,
         question.scoring.basePoints
       );
+    } else {
+      // Reset streak on wrong answer
+      await redisDataStructuresService.updateParticipantStreak(participantId, 0);
     }
 
-    // Calculate total points
-    const totalPoints = basePoints + partialCredit + speedBonus + streakBonus;
+    // Calculate negative marking deduction for incorrect answers
+    // Requirements: 12.2, 12.3, 12.4
+    let negativeDeduction = 0;
+    if (!isFullyCorrect && partialCredit === 0) {
+      // Only apply negative marking if answer is fully incorrect (no partial credit)
+      negativeDeduction = await this.calculateNegativeDeduction(
+        sessionId,
+        participantId,
+        question.scoring.basePoints
+      );
+    }
+
+    // Calculate total points (deduction is subtracted)
+    const totalPoints = basePoints + partialCredit + speedBonus + streakBonus - negativeDeduction;
 
     return {
       basePoints,
       speedBonus,
       streakBonus,
       partialCredit,
+      negativeDeduction,
       totalPoints,
       isCorrect: isFullyCorrect,
     };
@@ -669,7 +698,91 @@ class ScoringService {
   }
 
   /**
+   * Calculate negative marking deduction for incorrect answers
+   * 
+   * Formula: basePoints × negativeMarkingPercentage / 100
+   * 
+   * The deduction is applied when:
+   * - Negative marking is enabled for the session (examMode.negativeMarkingEnabled)
+   * - The answer is incorrect (no partial credit awarded)
+   * 
+   * The resulting participant score is floored at zero to prevent negative scores.
+   * 
+   * Requirements: 12.2, 12.3, 12.4
+   * 
+   * @param sessionId - Session ID to get exam mode config
+   * @param participantId - Participant ID to check current score for floor calculation
+   * @param basePoints - Base points for the question
+   * @returns Negative deduction points (always >= 0)
+   */
+  private async calculateNegativeDeduction(
+    sessionId: string,
+    participantId: string,
+    basePoints: number
+  ): Promise<number> {
+    try {
+      // Get session to check exam mode configuration
+      const db = mongodbService.getDb();
+      const sessionsCollection = db.collection('sessions');
+      const session = await sessionsCollection.findOne({ sessionId });
+
+      if (!session) {
+        console.error('[Scoring Service] Session not found for negative marking:', sessionId);
+        return 0;
+      }
+
+      // Check if negative marking is enabled
+      const examMode = session.examMode;
+      if (!examMode || !examMode.negativeMarkingEnabled) {
+        return 0; // Negative marking not enabled
+      }
+
+      const negativeMarkingPercentage = examMode.negativeMarkingPercentage || 0;
+      if (negativeMarkingPercentage <= 0) {
+        return 0; // No deduction if percentage is 0 or negative
+      }
+
+      // Calculate deduction: basePoints × negativeMarkingPercentage / 100
+      // Requirement 12.3
+      const deduction = Math.floor(basePoints * negativeMarkingPercentage / 100);
+
+      // Get current participant score to ensure we don't go below zero
+      // Requirement 12.4
+      const participantSession = await redisDataStructuresService.getParticipantSession(
+        participantId
+      );
+
+      if (!participantSession) {
+        return deduction; // Return full deduction, floor will be applied in updateParticipantScore
+      }
+
+      const currentScore = participantSession.totalScore || 0;
+
+      // Cap deduction so score doesn't go below zero
+      // Requirement 12.4: Ensure participant scores do not go below zero
+      const cappedDeduction = Math.min(deduction, currentScore);
+
+      console.log('[Scoring Service] Calculated negative marking deduction:', {
+        sessionId,
+        participantId,
+        basePoints,
+        negativeMarkingPercentage,
+        calculatedDeduction: deduction,
+        currentScore,
+        cappedDeduction,
+      });
+
+      return cappedDeduction;
+    } catch (error) {
+      console.error('[Scoring Service] Error calculating negative deduction:', error);
+      return 0; // Return 0 on error to avoid penalizing participant
+    }
+  }
+
+  /**
    * Update participant score in Redis
+   * 
+   * Ensures score never goes below zero (Requirement 12.4)
    * 
    * @param participantId - Participant ID
    * @param scoreCalculation - Score calculation breakdown
@@ -695,8 +808,8 @@ class ScoringService {
 
       const currentScore = participantSession.totalScore || 0;
 
-      // Calculate new score
-      const newScore = currentScore + scoreCalculation.totalPoints;
+      // Calculate new score and ensure it doesn't go below zero (Requirement 12.4)
+      const newScore = Math.max(0, currentScore + scoreCalculation.totalPoints);
 
       // Update participant score in Redis
       await redis.hset(participantKey, {
@@ -709,6 +822,7 @@ class ScoringService {
         oldScore: currentScore,
         newScore,
         pointsAdded: scoreCalculation.totalPoints,
+        negativeDeduction: scoreCalculation.negativeDeduction,
       });
     } catch (error) {
       console.error('[Scoring Service] Error updating participant score:', error);
@@ -763,6 +877,48 @@ class ScoringService {
       });
     } catch (error) {
       console.error('[Scoring Service] Error updating leaderboard:', error);
+    }
+  }
+
+  /**
+   * Broadcast answer result to participant
+   * 
+   * Sends answer_result event with points breakdown for the current question.
+   * This allows the participant to see how many points they earned.
+   * 
+   * @param participantId - Participant ID
+   * @param questionId - Question ID
+   * @param scoreCalculation - Score calculation breakdown
+   */
+  private async broadcastAnswerResult(
+    participantId: string,
+    questionId: string,
+    scoreCalculation: ScoreCalculation
+  ): Promise<void> {
+    try {
+      await pubSubService.publishToParticipant(
+        participantId,
+        'answer_result',
+        {
+          questionId,
+          isCorrect: scoreCalculation.isCorrect,
+          pointsAwarded: scoreCalculation.basePoints + scoreCalculation.partialCredit,
+          speedBonus: scoreCalculation.speedBonus,
+          streakBonus: scoreCalculation.streakBonus,
+          negativeDeduction: scoreCalculation.negativeDeduction,
+          totalPoints: scoreCalculation.totalPoints,
+        }
+      );
+
+      console.log('[Scoring Service] Broadcasted answer result:', {
+        participantId,
+        questionId,
+        isCorrect: scoreCalculation.isCorrect,
+        negativeDeduction: scoreCalculation.negativeDeduction,
+        totalPoints: scoreCalculation.totalPoints,
+      });
+    } catch (error) {
+      console.error('[Scoring Service] Error broadcasting answer result:', error);
     }
   }
 
@@ -879,12 +1035,13 @@ class ScoringService {
   async stop(): Promise<void> {
     console.log('[Scoring Service] Stopping scoring worker...');
 
-    // Unsubscribe from all channels
+    // Unsubscribe from all channels and disconnect the dedicated subscriber
     if (this.subscriber) {
       for (const sessionId of this.subscribedSessions) {
         await this.unsubscribeFromSession(sessionId);
       }
       this.subscriber.removeAllListeners();
+      await this.subscriber.quit();
       this.subscriber = null;
     }
 

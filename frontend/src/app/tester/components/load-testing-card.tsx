@@ -4,11 +4,12 @@
  * Provides controls to simulate concurrent participants:
  * - Input for number of participants (100-1000)
  * - Input for target session join code
- * - Start/Stop buttons
+ * - Rate limit configuration (requests per second, burst limit, base delay)
+ * - Start/Stop buttons with "Keep Connections" option
  * - Progress indicator
  * - Status display
  * 
- * Requirements: 15.1
+ * Requirements: 1.4, 2.4, 15.1
  */
 
 'use client';
@@ -18,7 +19,9 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
-import type { LoadTestStatus, LoadTestStats } from '@/lib/load-tester';
+import type { LoadTestStatus, LoadTestStats, RateLimitConfig } from '@/lib/load-tester';
+import { DEFAULT_RATE_LIMIT_CONFIG } from '@/lib/load-tester';
+import { preserveConnections } from '@/lib/load-tester-singleton';
 
 /**
  * Props for LoadTestingCard
@@ -29,9 +32,14 @@ interface LoadTestingCardProps {
   /** Current statistics */
   stats: LoadTestStats | null;
   /** Callback when starting the test */
-  onStart: (config: { joinCode: string; participantCount: number; simulateAnswers: boolean }) => void;
+  onStart: (config: { 
+    joinCode: string; 
+    participantCount: number; 
+    simulateAnswers: boolean;
+    rateLimitConfig?: RateLimitConfig;
+  }) => void;
   /** Callback when stopping the test */
-  onStop: () => void;
+  onStop: (keepConnections?: boolean) => void;
   /** Whether controls are disabled */
   isDisabled?: boolean;
   /** Error message to display */
@@ -129,6 +137,50 @@ export function LoadTestingCard({
   const [participantCount, setParticipantCount] = React.useState(100);
   const [simulateAnswers, setSimulateAnswers] = React.useState(true);
   const [validationError, setValidationError] = React.useState<string | null>(null);
+  
+  // Rate limit configuration state (Requirements: 1.4)
+  const [requestsPerSecond, setRequestsPerSecond] = React.useState(DEFAULT_RATE_LIMIT_CONFIG.requestsPerSecond);
+  const [burstLimit, setBurstLimit] = React.useState(DEFAULT_RATE_LIMIT_CONFIG.burstLimit);
+  const [baseDelayMs, setBaseDelayMs] = React.useState(DEFAULT_RATE_LIMIT_CONFIG.baseDelayMs);
+  const [showAdvancedConfig, setShowAdvancedConfig] = React.useState(false);
+  
+  // Keep connections toggle state (Requirements: 2.4)
+  const [keepConnections, setKeepConnections] = React.useState(false);
+
+  // Load saved config from localStorage on mount
+  React.useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const savedConfig = localStorage.getItem('loadTestConfig');
+      if (savedConfig) {
+        try {
+          const config = JSON.parse(savedConfig);
+          if (config.joinCode) setJoinCode(config.joinCode);
+          if (config.participantCount) setParticipantCount(config.participantCount);
+          if (typeof config.simulateAnswers === 'boolean') setSimulateAnswers(config.simulateAnswers);
+          // Load rate limit config (Requirements: 1.4)
+          if (config.requestsPerSecond) setRequestsPerSecond(config.requestsPerSecond);
+          if (config.burstLimit) setBurstLimit(config.burstLimit);
+          if (config.baseDelayMs) setBaseDelayMs(config.baseDelayMs);
+        } catch {
+          // Ignore parse errors
+        }
+      }
+    }
+  }, []);
+
+  // Save config to localStorage when it changes
+  React.useEffect(() => {
+    if (typeof window !== 'undefined' && joinCode) {
+      localStorage.setItem('loadTestConfig', JSON.stringify({
+        joinCode,
+        participantCount,
+        simulateAnswers,
+        requestsPerSecond,
+        burstLimit,
+        baseDelayMs,
+      }));
+    }
+  }, [joinCode, participantCount, simulateAnswers, requestsPerSecond, burstLimit, baseDelayMs]);
 
   const isRunning = status === 'running' || status === 'starting' || status === 'stopping';
   const canStart = status === 'idle' || status === 'stopped' || status === 'error';
@@ -149,7 +201,31 @@ export function LoadTestingCard({
     }
 
     setValidationError(null);
-    onStart({ joinCode: joinCode.toUpperCase(), participantCount, simulateAnswers });
+    onStart({ 
+      joinCode: joinCode.toUpperCase(), 
+      participantCount, 
+      simulateAnswers,
+      rateLimitConfig: {
+        requestsPerSecond,
+        burstLimit,
+        baseDelayMs,
+        maxRetries: DEFAULT_RATE_LIMIT_CONFIG.maxRetries,
+        backoffMultiplier: DEFAULT_RATE_LIMIT_CONFIG.backoffMultiplier,
+      },
+    });
+  };
+
+  /**
+   * Handle stop with optional connection preservation
+   * 
+   * Requirements: 2.4
+   */
+  const handleStop = () => {
+    if (keepConnections) {
+      // Preserve connections before stopping (Requirements: 2.4)
+      preserveConnections();
+    }
+    onStop(keepConnections);
   };
 
   /**
@@ -261,6 +337,106 @@ export function LoadTestingCard({
             Simulate answer submissions
           </label>
         </div>
+
+        {/* Rate Limit Configuration Section (Requirements: 1.4) */}
+        <div className="mt-4 pt-4 border-t border-[var(--neu-surface)]">
+          <button
+            type="button"
+            onClick={() => setShowAdvancedConfig(!showAdvancedConfig)}
+            disabled={isRunning || isDisabled}
+            className={cn(
+              'flex items-center gap-2 text-body-sm font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors',
+              (isRunning || isDisabled) && 'opacity-50 cursor-not-allowed'
+            )}
+          >
+            <svg
+              className={cn(
+                'w-4 h-4 transition-transform duration-fast',
+                showAdvancedConfig && 'rotate-90'
+              )}
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M9 5l7 7-7 7"
+              />
+            </svg>
+            Rate Limit Configuration
+          </button>
+
+          <AnimatePresence>
+            {showAdvancedConfig && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+                exit={{ opacity: 0, height: 0 }}
+                transition={{ duration: 0.2 }}
+                className="overflow-hidden"
+              >
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
+                  {/* Requests Per Second */}
+                  <Input
+                    label="Requests/Second"
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={requestsPerSecond}
+                    onChange={(e) => {
+                      const value = parseInt(e.target.value, 10);
+                      if (!isNaN(value)) {
+                        setRequestsPerSecond(Math.min(100, Math.max(1, value)));
+                      }
+                    }}
+                    disabled={isRunning || isDisabled}
+                    helperText="Max requests per second (1-100)"
+                  />
+
+                  {/* Burst Limit */}
+                  <Input
+                    label="Burst Limit"
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={burstLimit}
+                    onChange={(e) => {
+                      const value = parseInt(e.target.value, 10);
+                      if (!isNaN(value)) {
+                        setBurstLimit(Math.min(100, Math.max(1, value)));
+                      }
+                    }}
+                    disabled={isRunning || isDisabled}
+                    helperText="Initial burst limit (1-100)"
+                  />
+
+                  {/* Base Delay */}
+                  <Input
+                    label="Base Delay (ms)"
+                    type="number"
+                    min={10}
+                    max={1000}
+                    value={baseDelayMs}
+                    onChange={(e) => {
+                      const value = parseInt(e.target.value, 10);
+                      if (!isNaN(value)) {
+                        setBaseDelayMs(Math.min(1000, Math.max(10, value)));
+                      }
+                    }}
+                    disabled={isRunning || isDisabled}
+                    helperText="Delay between requests (10-1000ms)"
+                  />
+                </div>
+
+                <p className="mt-3 text-caption text-[var(--text-muted)]">
+                  These settings control how quickly participants join. Lower values may trigger server rate limits.
+                </p>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
       </div>
 
       {/* Error Display */}
@@ -303,46 +479,53 @@ export function LoadTestingCard({
       </AnimatePresence>
 
       {/* Action Buttons */}
-      <div className="flex gap-3">
-        {canStart ? (
-          <Button
-            variant="primary"
-            size="lg"
-            onClick={handleStart}
-            disabled={isDisabled}
-            leftIcon={
-              <svg
-                className="w-5 h-5"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
+      <div className="flex flex-col gap-4">
+        {/* Keep Connections Toggle - Only shown when test is running (Requirements: 2.4) */}
+        <AnimatePresence>
+          {isRunning && status !== 'stopping' && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className="flex items-center gap-3 p-3 rounded-md bg-[var(--neu-surface)] neu-pressed"
+            >
+              <button
+                type="button"
+                role="switch"
+                aria-checked={keepConnections}
+                onClick={() => setKeepConnections(!keepConnections)}
+                className={cn(
+                  'relative inline-flex h-6 w-11 items-center rounded-full transition-colors duration-fast',
+                  keepConnections ? 'bg-primary' : 'bg-[var(--neu-background)]'
+                )}
               >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"
+                <span
+                  className={cn(
+                    'inline-block h-4 w-4 transform rounded-full bg-white transition-transform duration-fast shadow-sm',
+                    keepConnections ? 'translate-x-6' : 'translate-x-1'
+                  )}
                 />
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-                />
-              </svg>
-            }
-          >
-            Start Load Test
-          </Button>
-        ) : (
-          <Button
-            variant="danger"
-            size="lg"
-            onClick={onStop}
-            disabled={status === 'stopping'}
-            isLoading={status === 'stopping'}
-            leftIcon={
-              status !== 'stopping' ? (
+              </button>
+              <div className="flex-1">
+                <label className="text-body-sm font-medium text-[var(--text-primary)]">
+                  Keep connections alive
+                </label>
+                <p className="text-caption text-[var(--text-muted)]">
+                  Preserve participant connections for use in other tests
+                </p>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <div className="flex gap-3">
+          {canStart ? (
+            <Button
+              variant="primary"
+              size="lg"
+              onClick={handleStart}
+              disabled={isDisabled}
+              leftIcon={
                 <svg
                   className="w-5 h-5"
                   fill="none"
@@ -353,21 +536,54 @@ export function LoadTestingCard({
                     strokeLinecap="round"
                     strokeLinejoin="round"
                     strokeWidth={2}
-                    d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                    d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"
                   />
                   <path
                     strokeLinecap="round"
                     strokeLinejoin="round"
                     strokeWidth={2}
-                    d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"
+                    d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
                   />
                 </svg>
-              ) : undefined
-            }
-          >
-            {status === 'stopping' ? 'Stopping...' : 'Stop Test'}
-          </Button>
-        )}
+              }
+            >
+              Start Load Test
+            </Button>
+          ) : (
+            <Button
+              variant="danger"
+              size="lg"
+              onClick={handleStop}
+              disabled={status === 'stopping'}
+              isLoading={status === 'stopping'}
+              leftIcon={
+                status !== 'stopping' ? (
+                  <svg
+                    className="w-5 h-5"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                    />
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"
+                    />
+                  </svg>
+                ) : undefined
+              }
+            >
+              {status === 'stopping' ? 'Stopping...' : keepConnections ? 'Stop & Keep Connections' : 'Stop Test'}
+            </Button>
+          )}
+        </div>
       </div>
     </motion.div>
   );

@@ -20,6 +20,8 @@
 import * as React from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { SpectatorBadge } from './spectator-badge';
+import { getImageUrl } from '@/lib/utils';
+import { CopyPrevention } from '@/components/CopyPrevention';
 
 // ==================== Types ====================
 
@@ -65,6 +67,19 @@ export interface QuestionScreenProps {
   isSpectator?: boolean;
   /** Whether the participant was eliminated (for spectator badge styling) */
   isEliminated?: boolean;
+  /** Current number input value (for NUMBER_INPUT questions) */
+  numberInputValue?: string;
+  /** Callback when number input changes */
+  onNumberInputChange?: (value: string) => void;
+  /** Current text input value (for OPEN_ENDED questions) */
+  textInputValue?: string;
+  /** Callback when text input changes */
+  onTextInputChange?: (value: string) => void;
+  /** Negative marking configuration - Requirements: 12.5, 12.6 */
+  negativeMarking?: {
+    enabled: boolean;
+    percentage: number;
+  };
 }
 
 // ==================== Constants ====================
@@ -377,7 +392,7 @@ function QuestionImage({ imageUrl, alt }: { imageUrl: string; alt: string }) {
       className="w-full rounded-lg overflow-hidden neu-pressed mb-4"
     >
       <img
-        src={imageUrl}
+        src={getImageUrl(imageUrl)}
         alt={alt}
         className="w-full h-auto max-h-48 object-contain bg-[var(--neu-surface)]"
         loading="eager"
@@ -471,6 +486,17 @@ function SpectatorOptionButton({
   hasImage: boolean;
   onSelect: () => void;
 }) {
+  // Log option image URL for debugging
+  React.useEffect(() => {
+    if (option.optionImageUrl) {
+      const fullUrl = getImageUrl(option.optionImageUrl);
+      console.log(`[OptionButton ${label}] Image URL:`, {
+        original: option.optionImageUrl,
+        resolved: fullUrl,
+      });
+    }
+  }, [option.optionImageUrl, label]);
+
   // Spectator-specific styling: grayed out, no hover effects
   const spectatorStyles = isSpectator
     ? 'opacity-60 cursor-default pointer-events-none'
@@ -523,10 +549,19 @@ function SpectatorOptionButton({
         {hasImage && option.optionImageUrl && (
           <div className="mb-2 rounded-lg overflow-hidden">
             <img
-              src={option.optionImageUrl}
+              src={getImageUrl(option.optionImageUrl)}
               alt={`Option ${label}`}
               className={`w-full h-auto max-h-20 sm:max-h-24 object-contain ${isSpectator ? 'opacity-70' : ''}`}
               loading="lazy"
+              onError={(e) => {
+                console.error(`[OptionButton ${label}] Image failed to load:`, {
+                  src: (e.target as HTMLImageElement).src,
+                  originalUrl: option.optionImageUrl,
+                });
+              }}
+              onLoad={() => {
+                console.log(`[OptionButton ${label}] Image loaded successfully`);
+              }}
             />
           </div>
         )}
@@ -694,6 +729,164 @@ function ScoreHeader({
   );
 }
 
+/**
+ * Negative marking warning banner
+ * Displays a warning to participants when negative marking is enabled
+ * Requirements: 12.5, 12.6
+ */
+function NegativeMarkingBanner({
+  percentage,
+}: {
+  percentage: number;
+}) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -10 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="mb-3 sm:mb-4 px-3 py-2 rounded-lg bg-error/10 border border-error/20"
+    >
+      <div className="flex items-center gap-2">
+        <svg
+          className="w-4 h-4 text-error flex-shrink-0"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          aria-hidden="true"
+        >
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+            d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+          />
+        </svg>
+        <span className="text-xs sm:text-sm font-medium text-error">
+          Negative marking: -{percentage}% for wrong answers
+        </span>
+      </div>
+    </motion.div>
+  );
+}
+
+/**
+ * Number input field for NUMBER_INPUT question type
+ * Mobile-friendly with large touch targets and numeric keyboard
+ */
+function NumberInputField({
+  value,
+  onChange,
+  isDisabled,
+  isSpectator,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  isDisabled: boolean;
+  isSpectator: boolean;
+}) {
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    // Allow only numbers, decimal point, and negative sign
+    const newValue = e.target.value.replace(/[^0-9.-]/g, '');
+    onChange(newValue);
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="w-full"
+    >
+      <div className={`
+        neu-pressed rounded-xl p-4 sm:p-5
+        ${isSpectator ? 'opacity-60' : ''}
+      `}>
+        <label className="block text-sm font-medium text-[var(--text-secondary)] mb-3">
+          Enter your answer
+        </label>
+        <input
+          type="number"
+          inputMode="decimal"
+          value={value}
+          onChange={handleChange}
+          disabled={isDisabled || isSpectator}
+          placeholder="Type a number..."
+          className={`
+            w-full px-4 py-4 text-2xl sm:text-3xl font-bold text-center
+            bg-[var(--neu-surface)] rounded-lg
+            border-2 border-transparent
+            focus:border-primary focus:outline-none
+            transition-all duration-200
+            placeholder:text-[var(--text-muted)] placeholder:font-normal placeholder:text-lg
+            ${isDisabled ? 'cursor-not-allowed opacity-60' : ''}
+            ${isSpectator ? 'pointer-events-none' : ''}
+          `}
+          aria-label="Number answer input"
+        />
+        <p className="mt-2 text-xs text-[var(--text-muted)] text-center">
+          Use the numeric keyboard to enter your answer
+        </p>
+      </div>
+    </motion.div>
+  );
+}
+
+/**
+ * Text input field for OPEN_ENDED question type
+ * Mobile-friendly textarea with character count
+ */
+function TextInputField({
+  value,
+  onChange,
+  isDisabled,
+  isSpectator,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  isDisabled: boolean;
+  isSpectator: boolean;
+}) {
+  const maxLength = 500;
+  
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="w-full"
+    >
+      <div className={`
+        neu-pressed rounded-xl p-4 sm:p-5
+        ${isSpectator ? 'opacity-60' : ''}
+      `}>
+        <label className="block text-sm font-medium text-[var(--text-secondary)] mb-3">
+          Enter your answer
+        </label>
+        <textarea
+          value={value}
+          onChange={(e) => onChange(e.target.value.slice(0, maxLength))}
+          disabled={isDisabled || isSpectator}
+          placeholder="Type your answer..."
+          rows={4}
+          className={`
+            w-full px-4 py-3 text-base
+            bg-[var(--neu-surface)] rounded-lg
+            border-2 border-transparent
+            focus:border-primary focus:outline-none
+            transition-all duration-200
+            placeholder:text-[var(--text-muted)]
+            resize-none
+            ${isDisabled ? 'cursor-not-allowed opacity-60' : ''}
+            ${isSpectator ? 'pointer-events-none' : ''}
+          `}
+          aria-label="Text answer input"
+        />
+        <div className="mt-2 flex justify-between text-xs text-[var(--text-muted)]">
+          <span>Open-ended response</span>
+          <span>{value.length}/{maxLength}</span>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
 // ==================== Main Component ====================
 
 /**
@@ -733,16 +926,32 @@ export function QuestionScreen({
   currentStreak,
   isSpectator = false,
   isEliminated = false,
+  numberInputValue = '',
+  onNumberInputChange,
+  textInputValue = '',
+  onTextInputChange,
+  negativeMarking,
 }: QuestionScreenProps) {
   // Determine if this is a multi-answer question
-  const isMultiAnswer = question.questionType === 'MULTI_CORRECT' || 
+  const isMultiAnswer = question.questionType === 'MULTI_SELECT' || 
+                        question.questionType === 'MULTI_CORRECT' || 
                         question.questionType === 'MULTIPLE_CHOICE_MULTI';
+
+  // Determine question type for special handling
+  const isNumberInput = question.questionType === 'NUMBER_INPUT';
+  const isOpenEnded = question.questionType === 'OPEN_ENDED';
 
   // Check if any option has an image
   const hasOptionImages = question.options.some((opt) => opt.optionImageUrl);
 
   // Check if submit button should be enabled (disabled for spectators)
-  const canSubmit = selectedOptions.length > 0 && !hasSubmitted && isConnected && !isSpectator;
+  // For NUMBER_INPUT, check if there's a value; for OPEN_ENDED, check text value
+  const hasAnswer = isNumberInput 
+    ? numberInputValue.trim().length > 0
+    : isOpenEnded
+      ? textInputValue.trim().length > 0
+      : selectedOptions.length > 0;
+  const canSubmit = hasAnswer && !hasSubmitted && isConnected && !isSpectator;
 
   // Options are disabled for spectators or after submission
   const optionsDisabled = hasSubmitted || isSpectator;
@@ -802,58 +1011,85 @@ export function QuestionScreen({
           </div>
         )}
 
+        {/* Negative marking warning banner - Requirements: 12.5, 12.6 */}
+        {negativeMarking?.enabled && !isSpectator && (
+          <NegativeMarkingBanner percentage={negativeMarking.percentage} />
+        )}
+
         {/* Question card - Responsive padding */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.3 }}
-          className="neu-raised-lg rounded-xl p-4 sm:p-5 mb-4 sm:mb-6"
-        >
-          {/* Question image */}
-          {question.questionImageUrl && (
-            <QuestionImage
-              imageUrl={question.questionImageUrl}
-              alt={`Question ${questionIndex + 1} image`}
+        {/* Wrapped with CopyPrevention to prevent copying quiz content (Requirements: 7.1, 7.2, 7.3, 7.4) */}
+        <CopyPrevention>
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3 }}
+            className="neu-raised-lg rounded-xl p-4 sm:p-5 mb-4 sm:mb-6"
+          >
+            {/* Question image */}
+            {question.questionImageUrl && (
+              <QuestionImage
+                imageUrl={question.questionImageUrl}
+                alt={`Question ${questionIndex + 1} image`}
+              />
+            )}
+
+            {/* Question text - Mobile-optimized font size (min 16px) */}
+            <h2 
+              className="text-base sm:text-lg font-semibold text-[var(--text-primary)] leading-relaxed [&_p]:m-0 [&_p]:inline"
+              dangerouslySetInnerHTML={{ __html: question.questionText }}
             />
+
+            {/* Multi-answer hint */}
+            {isMultiAnswer && !isSpectator && (
+              <p className="mt-2 text-xs sm:text-sm text-[var(--text-secondary)]">
+                Select all that apply
+              </p>
+            )}
+          </motion.div>
+
+          {/* Answer input - Conditional based on question type */}
+          {isNumberInput ? (
+            /* Number input for NUMBER_INPUT questions */
+            <NumberInputField
+              value={numberInputValue}
+              onChange={onNumberInputChange || (() => {})}
+              isDisabled={optionsDisabled}
+              isSpectator={isSpectator}
+            />
+          ) : isOpenEnded ? (
+            /* Text input for OPEN_ENDED questions */
+            <TextInputField
+              value={textInputValue}
+              onChange={onTextInputChange || (() => {})}
+              isDisabled={optionsDisabled}
+              isSpectator={isSpectator}
+            />
+          ) : (
+            /* Answer options for other question types - Compact spacing on mobile */
+            <div className="space-y-2 sm:space-y-3">
+              <AnimatePresence mode="wait">
+                {question.options.map((option, index) => (
+                  <motion.div
+                    key={option.optionId}
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ duration: 0.2, delay: index * 0.05 }}
+                  >
+                    <SpectatorOptionButton
+                      option={option}
+                      label={OPTION_LABELS[index] || String(index + 1)}
+                      isSelected={selectedOptions.includes(option.optionId)}
+                      isDisabled={optionsDisabled}
+                      isSpectator={isSpectator}
+                      hasImage={hasOptionImages}
+                      onSelect={() => handleOptionSelect(option.optionId)}
+                    />
+                  </motion.div>
+                ))}
+              </AnimatePresence>
+            </div>
           )}
-
-          {/* Question text - Mobile-optimized font size (min 16px) */}
-          <h2 
-            className="text-base sm:text-lg font-semibold text-[var(--text-primary)] leading-relaxed [&_p]:m-0 [&_p]:inline"
-            dangerouslySetInnerHTML={{ __html: question.questionText }}
-          />
-
-          {/* Multi-answer hint */}
-          {isMultiAnswer && !isSpectator && (
-            <p className="mt-2 text-xs sm:text-sm text-[var(--text-secondary)]">
-              Select all that apply
-            </p>
-          )}
-        </motion.div>
-
-        {/* Answer options - Compact spacing on mobile */}
-        <div className="space-y-2 sm:space-y-3">
-          <AnimatePresence mode="wait">
-            {question.options.map((option, index) => (
-              <motion.div
-                key={option.optionId}
-                initial={{ opacity: 0, x: -20 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ duration: 0.2, delay: index * 0.05 }}
-              >
-                <SpectatorOptionButton
-                  option={option}
-                  label={OPTION_LABELS[index] || String(index + 1)}
-                  isSelected={selectedOptions.includes(option.optionId)}
-                  isDisabled={optionsDisabled}
-                  isSpectator={isSpectator}
-                  hasImage={hasOptionImages}
-                  onSelect={() => handleOptionSelect(option.optionId)}
-                />
-              </motion.div>
-            ))}
-          </AnimatePresence>
-        </div>
+        </CopyPrevention>
       </div>
 
       {/* Submission confirmation */}
@@ -902,8 +1138,8 @@ export function QuestionScreen({
                 </svg>
                 Submitted
               </span>
-            ) : selectedOptions.length === 0 ? (
-              'Select an answer'
+            ) : !hasAnswer ? (
+              isNumberInput ? 'Enter a number' : isOpenEnded ? 'Enter your answer' : 'Select an answer'
             ) : (
               'Submit Answer'
             )}

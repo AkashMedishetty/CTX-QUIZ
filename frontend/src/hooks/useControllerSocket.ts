@@ -48,6 +48,13 @@ export interface SystemMetrics {
 export interface ParticipantWithStatus extends ParticipantInfo {
   status: 'connected' | 'disconnected';
   lastSeen?: number;
+  /** Focus monitoring data - Requirements: 9.4, 9.5 */
+  focusData?: {
+    isFocused: boolean;
+    totalLostCount: number;
+    totalLostTimeMs: number;
+    lastFocusLostAt?: number;
+  };
 }
 
 /**
@@ -93,6 +100,15 @@ export interface ControllerSessionState {
   systemMetrics: SystemMetrics | null;
   timer: TimerData | null;
   allowLateJoiners: boolean;
+  tournamentId?: string | null;
+  tournamentRoundNumber?: number;
+  examMode?: {
+    skipRevealPhase: boolean;
+    negativeMarkingEnabled: boolean;
+    negativeMarkingPercentage: number;
+    focusMonitoringEnabled: boolean;
+    autoAdvance: boolean;
+  } | null;
 }
 
 /**
@@ -119,6 +135,8 @@ export interface UseControllerSocketReturn {
   endQuiz: () => void;
   /** Void the current question */
   voidQuestion: (questionId: string, reason: string) => void;
+  /** Skip the current question (Requirements: 5.2, 5.3) */
+  skipQuestion: (reason?: string) => void;
   /** Pause the timer */
   pauseTimer: () => void;
   /** Resume the timer */
@@ -155,6 +173,8 @@ export interface UseControllerSocketOptions {
   onQuestionStarted?: (question: QuestionData, index: number) => void;
   /** Callback when answers are revealed */
   onRevealAnswers?: (correctOptions: string[]) => void;
+  /** Callback when question is voided - Requirements: 6.4 */
+  onQuestionVoided?: (data: { questionId: string; participantsAffected: number; wasCurrentQuestion: boolean; message: string }) => void;
 }
 
 /**
@@ -194,6 +214,7 @@ export function useControllerSocket(
     onQuizEnded,
     onQuestionStarted,
     onRevealAnswers,
+    onQuestionVoided,
   } = options;
 
   // State
@@ -211,6 +232,7 @@ export function useControllerSocket(
     onQuizEnded,
     onQuestionStarted,
     onRevealAnswers,
+    onQuestionVoided,
   });
 
   // Update callbacks ref
@@ -223,8 +245,9 @@ export function useControllerSocket(
       onQuizEnded,
       onQuestionStarted,
       onRevealAnswers,
+      onQuestionVoided,
     };
-  }, [onConnect, onDisconnect, onError, onQuizStarted, onQuizEnded, onQuestionStarted, onRevealAnswers]);
+  }, [onConnect, onDisconnect, onError, onQuizStarted, onQuizEnded, onQuestionStarted, onRevealAnswers, onQuestionVoided]);
 
   // Initialize socket and set up event handlers
   useEffect(() => {
@@ -266,6 +289,11 @@ export function useControllerSocket(
         ? data.currentState.state 
         : data.currentState;
       
+      // Extract examMode from currentState if it's an object
+      const examMode = typeof data.currentState === 'object'
+        ? (data.currentState as any).examMode ?? null
+        : null;
+      
       // Initialize session state
       setSessionState((prev) => ({
         sessionId,
@@ -281,6 +309,7 @@ export function useControllerSocket(
         systemMetrics: prev?.systemMetrics || null,
         timer: prev?.timer || null,
         allowLateJoiners: prev?.allowLateJoiners ?? true,
+        examMode: examMode ?? prev?.examMode ?? null,
       }));
 
       callbacksRef.current.onConnect?.();
@@ -337,6 +366,7 @@ export function useControllerSocket(
           status: 'connected' as const,
         })),
         allowLateJoiners: data.allowLateJoiners ?? prev?.allowLateJoiners ?? true,
+        examMode: (data as any).examMode ?? prev?.examMode ?? null,
       }));
     });
 
@@ -418,6 +448,56 @@ export function useControllerSocket(
       callbacksRef.current.onRevealAnswers?.(data.correctOptions);
     });
 
+    // Question skipped event - handles when controller skips a question
+    // In exam mode with skipRevealPhase, this will be followed by question_started
+    // In normal mode, this transitions to REVEAL state
+    socket.on('question_skipped', (data: {
+      questionId: string;
+      questionIndex: number;
+      reason: string;
+      timestamp: number;
+      examModeSkipReveal?: boolean;
+    }) => {
+      console.log('[Controller] Question skipped:', data);
+      
+      if (!data.examModeSkipReveal) {
+        // Normal mode: transition to REVEAL state (reveal_answers will follow)
+        setSessionState((prev) => ({
+          ...prev!,
+          timer: prev?.timer ? {
+            ...prev.timer,
+            state: 'expired' as const,
+            remainingSeconds: 0,
+          } : null,
+        }));
+      }
+      // In exam mode, question_started will follow immediately
+    });
+
+    // Timer expired event - handles when timer expires in exam mode
+    // This is a notification that time is up before transitioning to next question
+    socket.on('timer_expired', (data: {
+      questionId: string;
+      questionIndex: number;
+      examModeSkipReveal?: boolean;
+      timestamp: number;
+    }) => {
+      console.log('[Controller] Timer expired:', data);
+      
+      // Set timer state to expired
+      setSessionState((prev) => ({
+        ...prev!,
+        timer: prev?.timer ? {
+          ...prev.timer,
+          state: 'expired' as const,
+          remainingSeconds: 0,
+        } : null,
+      }));
+      
+      // In exam mode, question_started or quiz_ended will follow immediately
+      // In normal mode, reveal_answers will follow
+    });
+
     // Controller-specific events
     socket.on('answer_count_updated', (data) => {
       setSessionState((prev) => ({
@@ -494,6 +574,42 @@ export function useControllerSocket(
       });
     });
 
+    // Focus monitoring events - Requirements: 9.4, 9.5
+    // Receive participant_focus_changed events from server
+    socket.on('participant_focus_changed', (data: {
+      participantId: string;
+      nickname: string;
+      status: 'lost' | 'regained';
+      timestamp: number;
+      totalLostCount: number;
+      totalLostTimeMs: number;
+    }) => {
+      console.log('[Controller] Participant focus changed:', data);
+      
+      setSessionState((prev) => {
+        if (!prev) return prev;
+        
+        const updatedParticipants = prev.participants.map((p) =>
+          p.participantId === data.participantId
+            ? {
+                ...p,
+                focusData: {
+                  isFocused: data.status === 'regained',
+                  totalLostCount: data.totalLostCount,
+                  totalLostTimeMs: data.totalLostTimeMs,
+                  lastFocusLostAt: data.status === 'lost' ? data.timestamp : p.focusData?.lastFocusLostAt,
+                },
+              }
+            : p
+        );
+
+        return {
+          ...prev,
+          participants: updatedParticipants,
+        };
+      });
+    });
+
     socket.on('leaderboard_updated', (data) => {
       setSessionState((prev) => ({
         ...prev!,
@@ -514,6 +630,26 @@ export function useControllerSocket(
         ...prev!,
         allowLateJoiners: data.allowLateJoiners,
       }));
+    });
+
+    // Void question acknowledgment - Requirements: 6.4
+    // Controller Panel shall show confirmation that participants have been notified
+    socket.on('void_question_ack', (data: {
+      success: boolean;
+      sessionId: string;
+      questionId: string;
+      participantsAffected: number;
+      wasCurrentQuestion: boolean;
+      message: string;
+    }) => {
+      if (data.success) {
+        callbacksRef.current.onQuestionVoided?.({
+          questionId: data.questionId,
+          participantsAffected: data.participantsAffected,
+          wasCurrentQuestion: data.wasCurrentQuestion,
+          message: data.message,
+        });
+      }
     });
 
     // Auto-connect if enabled
@@ -574,6 +710,16 @@ export function useControllerSocket(
     [sessionId]
   );
 
+  // Skip question - Requirements: 5.2, 5.3
+  const skipQuestion = useCallback(
+    (reason?: string) => {
+      if (socketRef.current && sessionId) {
+        socketRef.current.emit('skip_question', { sessionId, reason });
+      }
+    },
+    [sessionId]
+  );
+
   const pauseTimer = useCallback(() => {
     if (socketRef.current && sessionId) {
       socketRef.current.emit('pause_timer', { sessionId });
@@ -616,7 +762,7 @@ export function useControllerSocket(
   const toggleLateJoiners = useCallback(
     (allow: boolean) => {
       if (socketRef.current && sessionId) {
-        socketRef.current.emit('toggle_late_joiners', { sessionId, allow });
+        socketRef.current.emit('toggle_late_joiners', { sessionId, allowLateJoiners: allow });
       }
     },
     [sessionId]
@@ -633,6 +779,7 @@ export function useControllerSocket(
     nextQuestion,
     endQuiz,
     voidQuestion,
+    skipQuestion,
     pauseTimer,
     resumeTimer,
     resetTimer,

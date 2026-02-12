@@ -198,7 +198,7 @@ class InputSanitizationService {
   sanitizeQuizTitle(title: string | null | undefined): string {
     return this.sanitize(title, {
       stripHtml: true,
-      encodeEntities: true,
+      encodeEntities: false,
       trim: true,
       normalizeWhitespace: true,
       allowNewlines: false,
@@ -215,7 +215,7 @@ class InputSanitizationService {
   sanitizeQuizDescription(description: string | null | undefined): string {
     return this.sanitize(description, {
       stripHtml: true,
-      encodeEntities: true,
+      encodeEntities: false,
       trim: true,
       normalizeWhitespace: false,
       allowNewlines: true,
@@ -232,7 +232,7 @@ class InputSanitizationService {
   sanitizeQuestionText(text: string | null | undefined): string {
     return this.sanitize(text, {
       stripHtml: true,
-      encodeEntities: true,
+      encodeEntities: false,
       trim: true,
       normalizeWhitespace: false,
       allowNewlines: true,
@@ -249,7 +249,7 @@ class InputSanitizationService {
   sanitizeOptionText(text: string | null | undefined): string {
     return this.sanitize(text, {
       stripHtml: true,
-      encodeEntities: true,
+      encodeEntities: false,
       trim: true,
       normalizeWhitespace: true,
       allowNewlines: false,
@@ -266,7 +266,7 @@ class InputSanitizationService {
   sanitizeExplanationText(text: string | null | undefined): string {
     return this.sanitize(text, {
       stripHtml: true,
-      encodeEntities: true,
+      encodeEntities: false,
       trim: true,
       normalizeWhitespace: false,
       allowNewlines: true,
@@ -283,7 +283,7 @@ class InputSanitizationService {
   sanitizeSpeakerNotes(notes: string | null | undefined): string {
     return this.sanitize(notes, {
       stripHtml: true,
-      encodeEntities: true,
+      encodeEntities: false,
       trim: true,
       normalizeWhitespace: false,
       allowNewlines: true,
@@ -300,7 +300,7 @@ class InputSanitizationService {
   sanitizeNickname(nickname: string | null | undefined): string {
     return this.sanitize(nickname, {
       stripHtml: true,
-      encodeEntities: true,
+      encodeEntities: false,
       trim: true,
       normalizeWhitespace: true,
       allowNewlines: false,
@@ -317,7 +317,7 @@ class InputSanitizationService {
   sanitizeAnswerText(text: string | null | undefined): string {
     return this.sanitize(text, {
       stripHtml: true,
-      encodeEntities: true,
+      encodeEntities: false,
       trim: true,
       normalizeWhitespace: false,
       allowNewlines: true,

@@ -6,6 +6,7 @@ import { mongodbService } from './services/mongodb.service';
 import { mongodbIndexesService } from './services/mongodb-indexes.service';
 import { redisService } from './services/redis.service';
 import { socketIOService } from './services/socketio.service';
+import { scoringService } from './services/scoring.service';
 import { config } from './config';
 
 console.log('Live Quiz Platform - Backend Server');
@@ -61,6 +62,11 @@ async function startServer() {
     const socketStatus = socketIOService.getStatus();
     console.log('Socket.IO Status:', socketStatus);
 
+    // Start scoring service worker
+    console.log('\n=== Starting Scoring Service ===');
+    await scoringService.start();
+    console.log('✓ Scoring service worker started');
+
     console.log('\n✓ Server initialization complete');
     console.log('✓ All services running:');
     console.log('  - MongoDB: Connected');
@@ -80,6 +86,10 @@ async function shutdown() {
   console.log('\nShutting down gracefully...');
 
   try {
+    // Stop scoring service
+    await scoringService.stop();
+    console.log('✓ Scoring service stopped');
+
     // Close Socket.IO server
     await socketIOService.close();
     console.log('✓ Socket.IO server stopped');

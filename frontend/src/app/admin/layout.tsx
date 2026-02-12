@@ -91,6 +91,18 @@ function AdminHeader() {
             >
               Sessions
             </Link>
+            <Link
+              href="/admin/tournaments"
+              className="text-body-sm font-medium text-[var(--text-secondary)] hover:text-primary transition-colors duration-fast"
+            >
+              Tournaments
+            </Link>
+            <Link
+              href="/admin/audit-logs"
+              className="text-body-sm font-medium text-[var(--text-secondary)] hover:text-primary transition-colors duration-fast"
+            >
+              Audit Logs
+            </Link>
           </nav>
         </div>
       </div>

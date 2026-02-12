@@ -69,6 +69,7 @@ router.post(
         branding: validatedData.branding,
         eliminationSettings: validatedData.eliminationSettings,
         ffiSettings: validatedData.ffiSettings,
+        examSettings: validatedData.examSettings,
         questions: questionsWithIds,
       };
 
@@ -373,6 +374,7 @@ router.put(
       if (validatedData.branding !== undefined) updateFields.branding = validatedData.branding;
       if (validatedData.eliminationSettings !== undefined) updateFields.eliminationSettings = validatedData.eliminationSettings;
       if (validatedData.ffiSettings !== undefined) updateFields.ffiSettings = validatedData.ffiSettings;
+      if (validatedData.examSettings !== undefined) updateFields.examSettings = validatedData.examSettings;
       if (validatedData.questions !== undefined) updateFields.questions = validatedData.questions;
 
       // Update quiz in MongoDB

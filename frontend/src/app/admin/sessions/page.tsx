@@ -3,10 +3,11 @@
  * 
  * Displays active and recent quiz sessions with:
  * - Session list with status indicators
- * - Quick actions (open controller, end session)
+ * - Status and date filters
+ * - Quick actions (open controller, end session, delete, export)
  * - Session details (join code, participant count)
  * 
- * Requirements: 2.1
+ * Requirements: 2.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7, 6.8
  */
 
 'use client';
@@ -16,12 +17,25 @@ import Link from 'next/link';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui';
-import { get, post } from '@/lib/api-client';
+import { 
+  Select, 
+  SelectTrigger, 
+  SelectValue, 
+  SelectContent, 
+  SelectItem 
+} from '@/components/ui/select';
+import { get, post, del } from '@/lib/api-client';
+import { ExportDialog, type ExportFormat } from '@/components/export-dialog';
 
 /**
  * Session state type
  */
 type SessionState = 'LOBBY' | 'ACTIVE_QUESTION' | 'REVEAL' | 'ENDED';
+
+/**
+ * Filter state type
+ */
+type FilterState = 'ALL' | SessionState;
 
 /**
  * Session data interface
@@ -148,6 +162,27 @@ function StopIcon({ className }: { className?: string }) {
   );
 }
 
+function DownloadIcon({ className }: { className?: string }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" y1="15" x2="12" y2="3" />
+    </svg>
+  );
+}
+
+function TrashIcon({ className }: { className?: string }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      <line x1="10" y1="11" x2="10" y2="17" />
+      <line x1="14" y1="11" x2="14" y2="17" />
+    </svg>
+  );
+}
+
 function CopyIcon({ className }: { className?: string }) {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
@@ -167,10 +202,18 @@ function RefreshIcon({ className }: { className?: string }) {
   );
 }
 
+function FilterIcon({ className }: { className?: string }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+    </svg>
+  );
+}
+
 /**
  * Empty state component
  */
-function EmptyState() {
+function EmptyState({ hasFilters }: { hasFilters: boolean }) {
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
@@ -181,19 +224,76 @@ function EmptyState() {
         <PlayIcon className="w-16 h-16 text-[var(--text-muted)]" />
       </div>
       <h3 className="text-h3 font-semibold text-[var(--text-primary)] mb-2">
-        No active sessions
+        {hasFilters ? 'No matching sessions' : 'No active sessions'}
       </h3>
       <p className="text-body text-[var(--text-secondary)] text-center max-w-md mb-6">
-        Start a session from any quiz to see it here. Active sessions will appear with their join codes and participant counts.
+        {hasFilters 
+          ? 'Try adjusting your filters to see more sessions.'
+          : 'Start a session from any quiz to see it here. Active sessions will appear with their join codes and participant counts.'}
       </p>
-      <Link href="/admin">
-        <Button variant="primary">
-          Go to Quizzes
-        </Button>
-      </Link>
+      {!hasFilters && (
+        <Link href="/admin">
+          <Button variant="primary">
+            Go to Quizzes
+          </Button>
+        </Link>
+      )}
     </motion.div>
   );
 }
+
+/**
+ * Delete confirmation modal
+ */
+function DeleteConfirmModal({
+  isOpen,
+  onClose,
+  onConfirm,
+  sessionTitle,
+  isDeleting,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+  sessionTitle: string;
+  isDeleting: boolean;
+}) {
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <motion.div
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        exit={{ opacity: 0, scale: 0.95 }}
+        className="relative neu-raised rounded-lg p-6 max-w-md w-full mx-4"
+      >
+        <h3 className="text-h3 font-semibold text-[var(--text-primary)] mb-2">
+          Delete Session?
+        </h3>
+        <p className="text-body text-[var(--text-secondary)] mb-6">
+          Are you sure you want to delete the session for &quot;{sessionTitle}&quot;? 
+          This will permanently remove all participant data and answers. This action cannot be undone.
+        </p>
+        <div className="flex justify-end gap-3">
+          <Button variant="secondary" onClick={onClose} disabled={isDeleting}>
+            Cancel
+          </Button>
+          <Button
+            variant="primary"
+            onClick={onConfirm}
+            isLoading={isDeleting}
+            className="bg-error hover:bg-error/90"
+          >
+            Delete Session
+          </Button>
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+
 
 /**
  * Session card component
@@ -201,11 +301,17 @@ function EmptyState() {
 function SessionCard({ 
   sessionData, 
   onEndSession,
-  isEnding 
+  onExport,
+  onDelete,
+  isEnding,
+  isDeleting,
 }: { 
   sessionData: SessionWithQuiz;
   onEndSession: (sessionId: string) => void;
+  onExport: (sessionId: string, quizTitle: string) => void;
+  onDelete: (sessionId: string, quizTitle: string) => void;
   isEnding: boolean;
+  isDeleting: boolean;
 }) {
   const { session, quiz } = sessionData;
   const [copied, setCopied] = React.useState(false);
@@ -217,6 +323,7 @@ function SessionCard({
   };
 
   const isActive = session.state !== 'ENDED';
+  const isLobby = session.state === 'LOBBY';
 
   return (
     <motion.div
@@ -240,8 +347,42 @@ function SessionCard({
         </span>
       </div>
 
-      {/* Join Code */}
-      {isActive && (
+      {/* Join Code - Prominent display for LOBBY sessions */}
+      {isLobby && (
+        <div className="neu-pressed rounded-lg p-5 mb-4 bg-primary/5 border border-primary/20">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-caption text-primary/70 mb-1 font-medium">Join Code</p>
+              <p className="font-mono text-[2.5rem] font-bold text-primary tracking-[0.3em] leading-none">
+                {session.joinCode}
+              </p>
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={copyJoinCode}
+              className="text-primary border-primary/30 hover:bg-primary/10"
+            >
+              {copied ? (
+                <span className="flex items-center gap-2">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="20 6 9 17 4 12" />
+                  </svg>
+                  Copied!
+                </span>
+              ) : (
+                <span className="flex items-center gap-2">
+                  <CopyIcon />
+                  Copy
+                </span>
+              )}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Join Code - Smaller display for active non-lobby sessions */}
+      {isActive && !isLobby && (
         <div className="neu-pressed rounded-lg p-4 mb-4">
           <div className="flex items-center justify-between">
             <div>
@@ -307,11 +448,32 @@ function SessionCard({
           </>
         )}
         {!isActive && (
-          <Link href={`/admin/sessions/${session.sessionId}/results`} className="flex-1">
-            <Button variant="secondary" size="sm" fullWidth>
-              View Results
+          <>
+            <Link href={`/admin/sessions/${session.sessionId}/results`} className="flex-1">
+              <Button variant="secondary" size="sm" fullWidth>
+                View Results
+              </Button>
+            </Link>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => onExport(session.sessionId, quiz.title)}
+              leftIcon={<DownloadIcon />}
+            >
+              Export
             </Button>
-          </Link>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => onDelete(session.sessionId, quiz.title)}
+              disabled={isDeleting}
+              isLoading={isDeleting}
+              className="text-error hover:bg-error/10"
+              leftIcon={!isDeleting ? <TrashIcon /> : undefined}
+            >
+              Delete
+            </Button>
+          </>
         )}
       </div>
     </motion.div>
@@ -343,14 +505,12 @@ function SessionCardSkeleton() {
 /**
  * Fetch sessions from API
  */
-async function fetchSessions(): Promise<SessionWithQuiz[]> {
-  // The backend doesn't have a list sessions endpoint yet, so we'll need to add it
-  // For now, we'll return an empty array and show the empty state
+async function fetchSessions(stateFilter?: FilterState): Promise<SessionWithQuiz[]> {
   try {
-    const response = await get<SessionsListResponse>('/sessions');
+    const params = stateFilter && stateFilter !== 'ALL' ? `?state=${stateFilter}` : '';
+    const response = await get<SessionsListResponse>(`/sessions${params}`);
     return response.sessions || [];
   } catch {
-    // If endpoint doesn't exist, return empty array
     return [];
   }
 }
@@ -363,17 +523,31 @@ async function endSession(sessionId: string): Promise<void> {
 }
 
 /**
+ * Delete session API call
+ */
+async function deleteSession(sessionId: string): Promise<void> {
+  await del(`/sessions/${sessionId}`);
+}
+
+
+/**
  * Sessions Management Page
  */
 export default function SessionsPage() {
   const queryClient = useQueryClient();
   const [endingId, setEndingId] = React.useState<string | null>(null);
+  const [deletingId, setDeletingId] = React.useState<string | null>(null);
+  const [exportSession, setExportSession] = React.useState<{ sessionId: string; quizTitle: string } | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = React.useState<{ sessionId: string; quizTitle: string } | null>(null);
+  
+  // Filters
+  const [stateFilter, setStateFilter] = React.useState<FilterState>('ALL');
 
-  // Fetch sessions
+  // Fetch sessions with filter
   const { data: sessions, isLoading, refetch } = useQuery({
-    queryKey: ['sessions'],
-    queryFn: fetchSessions,
-    refetchInterval: 5000, // Refresh every 5 seconds
+    queryKey: ['sessions', stateFilter],
+    queryFn: () => fetchSessions(stateFilter),
+    refetchInterval: stateFilter === 'ENDED' ? false : 5000, // Only auto-refresh for active sessions
   });
 
   // End session mutation
@@ -390,15 +564,58 @@ export default function SessionsPage() {
     },
   });
 
+  // Delete session mutation
+  const deleteMutation = useMutation({
+    mutationFn: deleteSession,
+    onMutate: (sessionId) => {
+      setDeletingId(sessionId);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['sessions'] });
+      setDeleteConfirm(null);
+    },
+    onSettled: () => {
+      setDeletingId(null);
+    },
+  });
+
   const handleEndSession = (sessionId: string) => {
     if (window.confirm('Are you sure you want to end this session? This cannot be undone.')) {
       endMutation.mutate(sessionId);
     }
   };
 
+  const handleExport = (sessionId: string, quizTitle: string) => {
+    setExportSession({ sessionId, quizTitle });
+  };
+
+  const handleDeleteClick = (sessionId: string, quizTitle: string) => {
+    setDeleteConfirm({ sessionId, quizTitle });
+  };
+
+  const handleDeleteConfirm = () => {
+    if (deleteConfirm) {
+      deleteMutation.mutate(deleteConfirm.sessionId);
+    }
+  };
+
+  const handleExportSubmit = async (sessionId: string, format: ExportFormat): Promise<Blob> => {
+    const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001';
+    const response = await fetch(`${backendUrl}/api/sessions/${sessionId}/export?format=${format}`, {
+      method: 'POST',
+    });
+    
+    if (!response.ok) {
+      throw new Error('Export failed');
+    }
+    
+    return response.blob();
+  };
+
   // Separate active and ended sessions
   const activeSessions = sessions?.filter(s => s.session.state !== 'ENDED') || [];
   const endedSessions = sessions?.filter(s => s.session.state === 'ENDED') || [];
+  const hasFilters = stateFilter !== 'ALL';
 
   return (
     <div>
@@ -409,7 +626,7 @@ export default function SessionsPage() {
         transition={{ duration: 0.3 }}
         className="mb-8"
       >
-        <div className="flex items-center justify-between gap-4 mb-2">
+        <div className="flex items-center justify-between gap-4 mb-4">
           <div>
             <h1 className="text-h1 font-semibold text-[var(--text-primary)]">
               Sessions
@@ -427,7 +644,66 @@ export default function SessionsPage() {
             Refresh
           </Button>
         </div>
+
+        {/* Filters */}
+        <div className="flex flex-wrap items-center gap-4 p-4 neu-pressed rounded-lg">
+          <div className="flex items-center gap-2">
+            <FilterIcon className="text-[var(--text-muted)]" />
+            <span className="text-body-sm text-[var(--text-secondary)]">Filters:</span>
+          </div>
+          
+          <div className="flex items-center gap-2">
+            <label className="text-body-sm text-[var(--text-muted)]">Status:</label>
+            <Select value={stateFilter} onValueChange={(value) => setStateFilter(value as FilterState)}>
+              <SelectTrigger className="min-w-[140px]" size="sm">
+                <SelectValue placeholder="All Sessions" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ALL">All Sessions</SelectItem>
+                <SelectItem value="LOBBY">Waiting</SelectItem>
+                <SelectItem value="ACTIVE_QUESTION">Live</SelectItem>
+                <SelectItem value="REVEAL">Revealing</SelectItem>
+                <SelectItem value="ENDED">Ended</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          {hasFilters && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setStateFilter('ALL')}
+              className="text-[var(--text-muted)]"
+            >
+              Clear Filters
+            </Button>
+          )}
+        </div>
       </motion.div>
+
+      {/* Export Dialog */}
+      {exportSession && (
+        <ExportDialog
+          isOpen={!!exportSession}
+          onClose={() => setExportSession(null)}
+          sessionId={exportSession.sessionId}
+          quizTitle={exportSession.quizTitle}
+          onExport={handleExportSubmit}
+        />
+      )}
+
+      {/* Delete Confirmation Modal */}
+      <AnimatePresence>
+        {deleteConfirm && (
+          <DeleteConfirmModal
+            isOpen={!!deleteConfirm}
+            onClose={() => setDeleteConfirm(null)}
+            onConfirm={handleDeleteConfirm}
+            sessionTitle={deleteConfirm.quizTitle}
+            isDeleting={!!deletingId}
+          />
+        )}
+      </AnimatePresence>
 
       {/* Content */}
       {isLoading ? (
@@ -437,11 +713,11 @@ export default function SessionsPage() {
           ))}
         </div>
       ) : !sessions?.length ? (
-        <EmptyState />
+        <EmptyState hasFilters={hasFilters} />
       ) : (
         <div className="space-y-8">
           {/* Active Sessions */}
-          {activeSessions.length > 0 && (
+          {activeSessions.length > 0 && (stateFilter === 'ALL' || stateFilter !== 'ENDED') && (
             <section>
               <h2 className="text-h2 font-semibold text-[var(--text-primary)] mb-4">
                 Active Sessions ({activeSessions.length})
@@ -453,7 +729,10 @@ export default function SessionsPage() {
                       key={sessionData.session.sessionId}
                       sessionData={sessionData}
                       onEndSession={handleEndSession}
+                      onExport={handleExport}
+                      onDelete={handleDeleteClick}
                       isEnding={endingId === sessionData.session.sessionId}
+                      isDeleting={deletingId === sessionData.session.sessionId}
                     />
                   ))}
                 </AnimatePresence>
@@ -462,19 +741,22 @@ export default function SessionsPage() {
           )}
 
           {/* Ended Sessions */}
-          {endedSessions.length > 0 && (
+          {endedSessions.length > 0 && (stateFilter === 'ALL' || stateFilter === 'ENDED') && (
             <section>
               <h2 className="text-h2 font-semibold text-[var(--text-muted)] mb-4">
                 Recent Sessions ({endedSessions.length})
               </h2>
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 opacity-75">
                 <AnimatePresence mode="popLayout">
-                  {endedSessions.slice(0, 6).map((sessionData) => (
+                  {endedSessions.slice(0, stateFilter === 'ENDED' ? 20 : 6).map((sessionData) => (
                     <SessionCard
                       key={sessionData.session.sessionId}
                       sessionData={sessionData}
                       onEndSession={handleEndSession}
+                      onExport={handleExport}
+                      onDelete={handleDeleteClick}
                       isEnding={endingId === sessionData.session.sessionId}
+                      isDeleting={deletingId === sessionData.session.sessionId}
                     />
                   ))}
                 </AnimatePresence>

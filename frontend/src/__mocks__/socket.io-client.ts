@@ -35,7 +35,6 @@ export interface MockSocket {
 export function createMockSocket(): MockSocket {
   const listeners = new Map<string, Set<MockEventCallback>>();
   const emittedEvents: Array<{ event: string; args: unknown[] }> = [];
-  let isConnected = false;
 
   const mockSocket: MockSocket = {
     id: 'mock-socket-id-' + Math.random().toString(36).substring(7),
@@ -64,13 +63,11 @@ export function createMockSocket(): MockSocket {
     }),
 
     disconnect: jest.fn(() => {
-      isConnected = false;
       mockSocket.connected = false;
       return mockSocket;
     }),
 
     connect: jest.fn(() => {
-      isConnected = true;
       mockSocket.connected = true;
       return mockSocket;
     }),
@@ -85,13 +82,11 @@ export function createMockSocket(): MockSocket {
     },
 
     _simulateConnect: () => {
-      isConnected = true;
       mockSocket.connected = true;
       mockSocket._simulateEvent('connect');
     },
 
     _simulateDisconnect: (reason = 'io client disconnect') => {
-      isConnected = false;
       mockSocket.connected = false;
       mockSocket._simulateEvent('disconnect', reason);
     },
@@ -101,7 +96,6 @@ export function createMockSocket(): MockSocket {
     _reset: () => {
       listeners.clear();
       emittedEvents.length = 0;
-      isConnected = false;
       mockSocket.connected = false;
       mockSocket.on.mockClear();
       mockSocket.off.mockClear();

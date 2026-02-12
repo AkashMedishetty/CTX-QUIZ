@@ -23,6 +23,7 @@
 import { useMemo, useEffect, useState } from 'react';
 import { motion, AnimatePresence, useAnimation } from 'framer-motion';
 import Image from 'next/image';
+import { getImageUrl } from '@/lib/utils';
 
 /**
  * Question option interface
@@ -196,6 +197,11 @@ export function QuestionScreen({
 }: QuestionScreenProps) {
   // Determine if question has an image
   const hasQuestionImage = Boolean(question.questionImageUrl);
+  
+  // Determine question type for special handling
+  const isNumberInput = question.questionType === 'NUMBER_INPUT';
+  const isOpenEnded = question.questionType === 'OPEN_ENDED';
+  const isSpecialInputType = isNumberInput || isOpenEnded;
   
   // Determine if any options have images
   const hasOptionImages = useMemo(() => {
@@ -384,7 +390,7 @@ export function QuestionScreen({
               <div className="neu-pressed rounded-lg md:rounded-xl p-2 md:p-3 lg:p-4 max-w-xl lg:max-w-2xl xl:max-w-3xl w-full">
                 <div className="relative w-full aspect-video">
                   <Image
-                    src={question.questionImageUrl!}
+                    src={getImageUrl(question.questionImageUrl!) || ''}
                     alt="Question image"
                     fill
                     className="object-contain rounded-md lg:rounded-lg"
@@ -398,23 +404,76 @@ export function QuestionScreen({
         </motion.div>
 
         {/* Options Grid - CSS Grid with responsive columns */}
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ duration: 0.5, delay: 0.3 }}
-          className={`grid gap-3 md:gap-4 lg:gap-6 flex-1 ${getGridCols()}`}
-        >
-          {question.options.map((option, index) => (
-            <OptionCard
-              key={option.optionId}
-              option={option}
-              label={OPTION_LABELS[index] || String(index + 1)}
-              index={index}
-              hasImage={Boolean(option.optionImageUrl)}
-              hasAnyImages={hasOptionImages}
-            />
-          ))}
-        </motion.div>
+        {/* For NUMBER_INPUT and OPEN_ENDED, show instruction instead of options */}
+        {isSpecialInputType ? (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.5, delay: 0.3 }}
+            className="flex-1 flex items-center justify-center"
+          >
+            <div className="neu-raised-lg rounded-xl p-8 md:p-12 lg:p-16 text-center max-w-2xl">
+              <div className="mb-6">
+                {isNumberInput ? (
+                  <svg
+                    className="w-16 h-16 md:w-20 md:h-20 lg:w-24 lg:h-24 mx-auto text-primary"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={1.5}
+                      d="M7 20l4-16m2 16l4-16M6 9h14M4 15h14"
+                    />
+                  </svg>
+                ) : (
+                  <svg
+                    className="w-16 h-16 md:w-20 md:h-20 lg:w-24 lg:h-24 mx-auto text-primary"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={1.5}
+                      d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
+                    />
+                  </svg>
+                )}
+              </div>
+              <h3 className="text-2xl md:text-3xl lg:text-4xl font-semibold text-[var(--text-primary)] mb-4">
+                {isNumberInput ? 'Enter a Number' : 'Type Your Answer'}
+              </h3>
+              <p className="text-lg md:text-xl lg:text-2xl text-[var(--text-secondary)]">
+                {isNumberInput 
+                  ? 'Participants are entering a numeric answer on their devices'
+                  : 'Participants are typing their response on their devices'
+                }
+              </p>
+            </div>
+          </motion.div>
+        ) : (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.5, delay: 0.3 }}
+            className={`grid gap-3 md:gap-4 lg:gap-6 flex-1 ${getGridCols()}`}
+          >
+            {question.options.map((option, index) => (
+              <OptionCard
+                key={option.optionId}
+                option={option}
+                label={OPTION_LABELS[index] || String(index + 1)}
+                index={index}
+                hasImage={Boolean(option.optionImageUrl)}
+                hasAnyImages={hasOptionImages}
+              />
+            ))}
+          </motion.div>
+        )}
       </main>
 
       {/* Footer - Responsive padding */}
@@ -544,11 +603,12 @@ function OptionCard({ option, label, index, hasImage, hasAnyImages }: OptionCard
           <div className="neu-pressed rounded-md md:rounded-lg p-1.5 md:p-2 lg:p-3 h-full">
             <div className="relative w-full aspect-video">
               <Image
-                src={option.optionImageUrl!}
+                src={getImageUrl(option.optionImageUrl!) || ''}
                 alt={`Option ${label} image`}
                 fill
                 className="object-contain rounded-sm md:rounded-md"
                 sizes="(max-width: 768px) 100vw, (max-width: 1280px) 50vw, 33vw"
+                loading="lazy"
               />
             </div>
           </div>

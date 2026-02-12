@@ -220,6 +220,51 @@ export interface ServerToClientEvents {
 
   // Late joiners events
   late_joiners_updated: (data: { allowLateJoiners: boolean }) => void;
+
+  // Question skip and timer expiry events (exam mode support)
+  question_skipped: (data: {
+    questionId: string;
+    questionIndex: number;
+    reason: string;
+    timestamp: number;
+    examModeSkipReveal?: boolean;
+  }) => void;
+  timer_expired: (data: {
+    questionId: string;
+    questionIndex: number;
+    examModeSkipReveal?: boolean;
+    timestamp: number;
+  }) => void;
+
+  // Question voided event - Requirements: 6.1, 6.2
+  // Broadcast when a question is voided by the controller
+  question_voided: (data: {
+    questionId: string;
+    reason: string;
+    timestamp: string;
+  }) => void;
+
+  // Void question acknowledgment - Requirements: 6.4
+  // Sent to controller after voiding a question
+  void_question_ack: (data: {
+    success: boolean;
+    sessionId: string;
+    questionId: string;
+    participantsAffected: number;
+    wasCurrentQuestion: boolean;
+    message: string;
+  }) => void;
+
+  // Focus monitoring events - Requirements: 9.4, 9.5
+  // Sent to controller when participant focus changes
+  participant_focus_changed: (data: {
+    participantId: string;
+    nickname: string;
+    status: 'lost' | 'regained';
+    timestamp: number;
+    totalLostCount: number;
+    totalLostTimeMs: number;
+  }) => void;
 }
 
 
@@ -253,12 +298,17 @@ export interface ClientToServerEvents {
   next_question: (data: { sessionId: string }) => void;
   end_quiz: (data: { sessionId: string }) => void;
   void_question: (data: { sessionId: string; questionId: string; reason: string }) => void;
+  skip_question: (data: { sessionId: string; reason?: string }) => void;
   pause_timer: (data: { sessionId: string }) => void;
   resume_timer: (data: { sessionId: string }) => void;
   reset_timer: (data: { sessionId: string; newTimeLimit: number }) => void;
   kick_participant: (data: { sessionId: string; participantId: string; reason: string }) => void;
   ban_participant: (data: { sessionId: string; participantId: string; reason: string }) => void;
-  toggle_late_joiners: (data: { sessionId: string; allow: boolean }) => void;
+  toggle_late_joiners: (data: { sessionId: string; allowLateJoiners: boolean }) => void;
+
+  // Focus monitoring events - Requirements: 9.2, 9.3
+  focus_lost: (data: { sessionId: string; participantId: string; timestamp: number }) => void;
+  focus_regained: (data: { sessionId: string; participantId: string; timestamp: number; durationMs: number }) => void;
 }
 
 // ==================== Socket Client Class ====================

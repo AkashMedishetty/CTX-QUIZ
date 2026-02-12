@@ -46,6 +46,17 @@ export interface QuizBranding {
 }
 
 /**
+ * Exam settings configuration
+ */
+export interface ExamSettings {
+  negativeMarkingEnabled: boolean;
+  negativeMarkingPercentage: number; // 5-100, default 25
+  focusMonitoringEnabled: boolean;
+  skipRevealPhase: boolean;
+  autoAdvance: boolean;
+}
+
+/**
  * Quiz form data interface
  */
 export interface QuizFormData {
@@ -55,6 +66,7 @@ export interface QuizFormData {
   branding: QuizBranding;
   eliminationPercentage?: number;
   ffiWinnerCount?: number;
+  examSettings?: ExamSettings;
 }
 
 /**
@@ -82,6 +94,13 @@ const quizFormSchema = z.object({
   }),
   eliminationPercentage: z.number().min(5).max(50).optional(),
   ffiWinnerCount: z.number().min(1).max(10).optional(),
+  examSettings: z.object({
+    negativeMarkingEnabled: z.boolean(),
+    negativeMarkingPercentage: z.number().min(5).max(100),
+    focusMonitoringEnabled: z.boolean(),
+    skipRevealPhase: z.boolean(),
+    autoAdvance: z.boolean(),
+  }).optional(),
 }).superRefine((data: z.infer<typeof quizFormSchemaBase>, ctx: z.RefinementCtx) => {
   if (data.quizType === 'ELIMINATION' && data.eliminationPercentage === undefined) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Elimination percentage is required', path: ['eliminationPercentage'] });
@@ -103,6 +122,13 @@ const quizFormSchemaBase = z.object({
   }),
   eliminationPercentage: z.number().optional(),
   ffiWinnerCount: z.number().optional(),
+  examSettings: z.object({
+    negativeMarkingEnabled: z.boolean(),
+    negativeMarkingPercentage: z.number(),
+    focusMonitoringEnabled: z.boolean(),
+    skipRevealPhase: z.boolean(),
+    autoAdvance: z.boolean(),
+  }).optional(),
 });
 
 const defaultValues: QuizFormData = {
@@ -112,6 +138,13 @@ const defaultValues: QuizFormData = {
   branding: { primaryColor: '#275249', secondaryColor: '#6B3093', logoUrl: '' },
   eliminationPercentage: 20,
   ffiWinnerCount: 5,
+  examSettings: {
+    negativeMarkingEnabled: false,
+    negativeMarkingPercentage: 25,
+    focusMonitoringEnabled: false,
+    skipRevealPhase: false,
+    autoAdvance: false,
+  },
 };
 
 const quizTypeDescriptions: Record<QuizType, string> = {
@@ -143,9 +176,9 @@ function ColorPicker({ value, onChange, label, error }: { value: string; onChang
   );
 }
 
-function FormSection({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
+function FormSection({ title, description, children, accent }: { title: string; description?: string; children: React.ReactNode; accent?: boolean }) {
   return (
-    <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className="neu-raised rounded-lg p-6">
+    <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className={cn('neu-raised rounded-lg p-6', accent && 'border-l-4 border-l-warning')}>
       <div className="mb-5">
         <h3 className="text-h3 font-semibold text-[var(--text-primary)]">{title}</h3>
         {description && <p className="text-body-sm text-[var(--text-secondary)] mt-1">{description}</p>}
@@ -163,11 +196,61 @@ function InfoIcon({ className }: { className?: string }) {
   );
 }
 
+function ToggleSwitch({
+  checked,
+  onChange,
+  label,
+  description,
+  disabled,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  label: string;
+  description?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <label className={cn('flex items-start gap-3 cursor-pointer', disabled && 'opacity-50 cursor-not-allowed')}>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        onClick={() => !disabled && onChange(!checked)}
+        disabled={disabled}
+        className={cn(
+          'relative inline-flex h-6 w-11 flex-shrink-0 rounded-full transition-colors duration-fast',
+          checked ? 'bg-primary' : 'bg-[var(--neu-surface)]',
+          'shadow-[inset_2px_2px_4px_var(--shadow-dark),inset_-2px_-2px_4px_var(--shadow-light)]'
+        )}
+      >
+        <span
+          className={cn(
+            'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md transition-transform duration-fast',
+            checked ? 'translate-x-5' : 'translate-x-0.5',
+            'mt-0.5'
+          )}
+        />
+      </button>
+      <div className="flex-1">
+        <span className="text-body font-medium text-[var(--text-primary)]">{label}</span>
+        {description && (
+          <p className="text-body-sm text-[var(--text-muted)] mt-0.5">{description}</p>
+        )}
+      </div>
+    </label>
+  );
+}
+
 
 export function QuizForm({ initialValues, onSubmit, onCancel, isLoading = false, submitText = 'Create Quiz' }: QuizFormProps) {
   const { register, handleSubmit, control, watch, formState: { errors } } = useForm<QuizFormData>({
     resolver: zodResolver(quizFormSchema),
-    defaultValues: { ...defaultValues, ...initialValues, branding: { ...defaultValues.branding, ...initialValues?.branding } },
+    defaultValues: { 
+      ...defaultValues, 
+      ...initialValues, 
+      branding: { ...defaultValues.branding, ...initialValues?.branding },
+      examSettings: { ...defaultValues.examSettings, ...initialValues?.examSettings },
+    },
   });
 
   const quizType = watch('quizType') as QuizType;
@@ -181,6 +264,7 @@ export function QuizForm({ initialValues, onSubmit, onCancel, isLoading = false,
     };
     if (data.quizType === 'ELIMINATION' && data.eliminationPercentage) cleanedData.eliminationPercentage = data.eliminationPercentage;
     if (data.quizType === 'FFI' && data.ffiWinnerCount) cleanedData.ffiWinnerCount = data.ffiWinnerCount;
+    if (data.examSettings) cleanedData.examSettings = data.examSettings;
     await onSubmit(cleanedData);
   };
 
@@ -296,6 +380,125 @@ export function QuizForm({ initialValues, onSubmit, onCancel, isLoading = false,
                 <span className="text-white font-semibold text-body-lg drop-shadow-md">Quiz Preview</span>
               </div>
             )} />
+          </div>
+        </div>
+      </FormSection>
+
+      <FormSection title="Exam Settings" description="Configure exam-specific features like negative marking" accent>
+        <div className="space-y-6">
+          {/* Negative Marking Toggle */}
+          <Controller
+            name="examSettings.negativeMarkingEnabled"
+            control={control}
+            render={({ field }: { field: ControllerRenderProps<QuizFormData, 'examSettings.negativeMarkingEnabled'> }) => (
+              <div className="space-y-3">
+                <ToggleSwitch
+                  checked={field.value ?? false}
+                  onChange={field.onChange}
+                  label="Negative Marking"
+                  description="Deduct points for incorrect answers"
+                />
+                <AnimatePresence>
+                  {field.value && (
+                    <motion.div
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: 'auto' }}
+                      exit={{ opacity: 0, height: 0 }}
+                      transition={{ duration: 0.2 }}
+                      className="pl-14 space-y-4"
+                    >
+                      <Controller
+                        name="examSettings.negativeMarkingPercentage"
+                        control={control}
+                        render={({ field: percentField }: { field: ControllerRenderProps<QuizFormData, 'examSettings.negativeMarkingPercentage'> }) => (
+                          <div>
+                            <label className="block text-body-sm font-medium text-[var(--text-primary)] mb-2">
+                              Deduction Percentage
+                            </label>
+                            <div className="flex items-center gap-4">
+                              <input
+                                type="range"
+                                min={5}
+                                max={100}
+                                step={5}
+                                value={percentField.value ?? 25}
+                                onChange={(e) => percentField.onChange(Number(e.target.value))}
+                                className="flex-1 h-2 rounded-full appearance-none cursor-pointer bg-[var(--neu-bg)] shadow-[inset_2px_2px_4px_var(--shadow-dark),inset_-2px_-2px_4px_var(--shadow-light)]"
+                                style={{ accentColor: 'var(--primary)' }}
+                              />
+                              <span className="text-body font-semibold text-primary min-w-[3rem] text-right">
+                                {percentField.value ?? 25}%
+                              </span>
+                            </div>
+                            <p className="mt-2 text-body-sm text-[var(--text-muted)]">
+                              {percentField.value ?? 25}% of base points will be deducted for wrong answers.
+                            </p>
+                            {/* Live Preview */}
+                            <div className="mt-3 p-3 rounded-md bg-error/5 border border-error/10">
+                              <p className="text-body-sm text-[var(--text-secondary)]">
+                                <span className="font-medium">Example:</span> For a 1000-point question, wrong answer deducts{' '}
+                                <span className="font-semibold text-error">
+                                  {Math.floor(1000 * (percentField.value ?? 25) / 100)} points
+                                </span>
+                              </p>
+                            </div>
+                          </div>
+                        )}
+                      />
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            )}
+          />
+
+          {/* Focus Monitoring Toggle */}
+          <Controller
+            name="examSettings.focusMonitoringEnabled"
+            control={control}
+            render={({ field }: { field: ControllerRenderProps<QuizFormData, 'examSettings.focusMonitoringEnabled'> }) => (
+              <ToggleSwitch
+                checked={field.value ?? false}
+                onChange={field.onChange}
+                label="Focus Monitoring"
+                description="Track when participants switch tabs or leave the quiz window"
+              />
+            )}
+          />
+
+          {/* Skip Reveal Phase Toggle */}
+          <Controller
+            name="examSettings.skipRevealPhase"
+            control={control}
+            render={({ field }: { field: ControllerRenderProps<QuizFormData, 'examSettings.skipRevealPhase'> }) => (
+              <ToggleSwitch
+                checked={field.value ?? false}
+                onChange={field.onChange}
+                label="Skip Reveal Phase"
+                description="Skip the answer reveal between questions. Participants see results only after the quiz ends."
+              />
+            )}
+          />
+
+          {/* Auto-Advance Toggle */}
+          <Controller
+            name="examSettings.autoAdvance"
+            control={control}
+            render={({ field }: { field: ControllerRenderProps<QuizFormData, 'examSettings.autoAdvance'> }) => (
+              <ToggleSwitch
+                checked={field.value ?? false}
+                onChange={field.onChange}
+                label="Auto-Advance Questions"
+                description="Automatically advance to the next question when the timer expires. No controller intervention needed."
+              />
+            )}
+          />
+
+          <div className="flex items-start gap-2 p-3 rounded-md bg-primary/5 border border-primary/10">
+            <InfoIcon className="text-primary flex-shrink-0 mt-0.5" />
+            <p className="text-body-sm text-[var(--text-secondary)]">
+              Exam settings apply to all questions in this quiz. Individual questions can override negative marking settings.
+            </p>
           </div>
         </div>
       </FormSection>

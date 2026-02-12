@@ -37,6 +37,11 @@ export interface Quiz {
   questions: { questionId: string }[];
   createdAt: string;
   updatedAt: string;
+  examSettings?: {
+    negativeMarkingEnabled: boolean;
+    negativeMarkingPercentage: number;
+    focusMonitoringEnabled: boolean;
+  };
 }
 
 /**
@@ -379,6 +384,23 @@ export const QuizCard = React.forwardRef<HTMLDivElement, QuizCardProps>(
                       <span className="font-medium text-[var(--text-primary)]">{quizTypeLabels[quiz.quizType]}</span>
                     </div>
                   </div>
+                  {quiz.examSettings && (quiz.examSettings.negativeMarkingEnabled || quiz.examSettings.focusMonitoringEnabled) && (
+                    <div className="neu-pressed rounded-lg p-4">
+                      <p className="text-caption text-[var(--text-muted)] mb-2">Exam Settings</p>
+                      {quiz.examSettings.negativeMarkingEnabled && (
+                        <div className="flex items-center justify-between text-body-sm">
+                          <span className="text-[var(--text-muted)]">Negative Marking</span>
+                          <span className="font-medium text-warning">{quiz.examSettings.negativeMarkingPercentage}% deduction</span>
+                        </div>
+                      )}
+                      {quiz.examSettings.focusMonitoringEnabled && (
+                        <div className="flex items-center justify-between text-body-sm mt-1">
+                          <span className="text-[var(--text-muted)]">Focus Monitoring</span>
+                          <span className="font-medium text-info">Enabled</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {error && (
                     <div className="bg-error/10 border border-error/20 rounded-lg p-4">
                       <p className="text-body-sm text-error">{error}</p>

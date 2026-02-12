@@ -244,6 +244,37 @@ export async function uploadFile<T>(
   return response.data;
 }
 
+/**
+ * Export session results as CSV or JSON
+ */
+export async function exportSessionResults(
+  sessionId: string,
+  format: 'csv' | 'json'
+): Promise<Blob> {
+  const response = await apiClient.post(
+    `/sessions/${sessionId}/export`,
+    { format },
+    {
+      responseType: 'blob',
+    }
+  );
+  return response.data;
+}
+
+/**
+ * Trigger browser download of a blob
+ */
+export function triggerDownload(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
 // Export the axios instance for advanced use cases
 export { apiClient };
 
@@ -255,5 +286,7 @@ export default {
   patch,
   delete: del,
   uploadFile,
+  exportSessionResults,
+  triggerDownload,
   client: apiClient,
 };

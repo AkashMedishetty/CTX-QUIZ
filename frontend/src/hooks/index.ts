@@ -84,3 +84,11 @@ export {
   type StoredSessionData,
   type AnswerStats as ParticipantAnswerStats,
 } from './useParticipantSocket';
+
+export {
+  useFocusMonitoring,
+  type UseFocusMonitoringReturn,
+  type FocusMonitoringOptions,
+  type FocusEvent,
+  type FocusEventType,
+} from './useFocusMonitoring';

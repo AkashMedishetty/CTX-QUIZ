@@ -282,3 +282,94 @@ export function mapRange(
 ): number {
   return ((value - inMin) * (outMax - outMin)) / (inMax - inMin) + outMin;
 }
+
+
+/**
+ * Get the full URL for an image path
+ * 
+ * Converts relative image paths (like /uploads/filename.png) to full URLs
+ * using the API base URL.
+ * 
+ * @param imagePath - Relative or absolute image path
+ * @returns Full image URL
+ * 
+ * @example
+ * ```ts
+ * getImageUrl('/uploads/image.png') // => "http://localhost:3001/uploads/image.png"
+ * getImageUrl('https://example.com/image.png') // => "https://example.com/image.png"
+ * ```
+ */
+export function getImageUrl(imagePath: string | undefined): string | undefined {
+  if (!imagePath) {
+    console.log('[getImageUrl] No image path provided');
+    return undefined;
+  }
+  
+  // If already a full URL, return as-is
+  if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
+    console.log('[getImageUrl] Already full URL:', imagePath);
+    return imagePath;
+  }
+  
+  // Get the API base URL (without /api suffix for static files)
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api';
+  const baseUrl = apiUrl.replace(/\/api$/, '');
+  
+  // Ensure path starts with /
+  const path = imagePath.startsWith('/') ? imagePath : `/${imagePath}`;
+  
+  const fullUrl = `${baseUrl}${path}`;
+  console.log('[getImageUrl] Converted path:', { original: imagePath, fullUrl });
+  
+  return fullUrl;
+}
+
+
+/**
+ * Preload an image by creating an Image object
+ * 
+ * This helps ensure images are cached before they're needed,
+ * reducing loading time when displaying questions.
+ * 
+ * @param imageUrl - URL of the image to preload
+ * @returns Promise that resolves when image is loaded
+ * 
+ * @example
+ * ```ts
+ * await preloadImage('/uploads/question-image.png');
+ * ```
+ */
+export function preloadImage(imageUrl: string | undefined): Promise<void> {
+  return new Promise((resolve) => {
+    if (!imageUrl) {
+      resolve();
+      return;
+    }
+    
+    const fullUrl = getImageUrl(imageUrl);
+    if (!fullUrl) {
+      resolve();
+      return;
+    }
+    
+    const img = new Image();
+    img.onload = () => resolve();
+    img.onerror = () => resolve(); // Resolve even on error to not block
+    img.src = fullUrl;
+  });
+}
+
+/**
+ * Preload multiple images in parallel
+ * 
+ * @param imageUrls - Array of image URLs to preload
+ * @returns Promise that resolves when all images are loaded
+ * 
+ * @example
+ * ```ts
+ * await preloadImages(['/uploads/q1.png', '/uploads/q2.png']);
+ * ```
+ */
+export function preloadImages(imageUrls: (string | undefined)[]): Promise<void[]> {
+  return Promise.all(imageUrls.map(preloadImage));
+}

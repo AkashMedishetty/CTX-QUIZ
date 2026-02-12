@@ -740,6 +740,7 @@ describe('ScoringService', () => {
         speedBonus: 0,
         streakBonus: 0,
         partialCredit: 0,
+        negativeDeduction: 0,
         totalPoints: 0,
         isCorrect: false,
       });
@@ -786,6 +787,22 @@ describe('ScoringService', () => {
         streakCount: 0,
         isActive: true,
         isEliminated: false,
+      });
+
+      // Mock MongoDB session for negative marking check
+      const mockSessionsCollection = {
+        findOne: jest.fn().mockResolvedValue({
+          sessionId: 'session-1',
+          quizId: 'quiz-1',
+          // No examMode means negative marking is disabled
+        }),
+      };
+
+      (mongodbService.getDb as jest.Mock).mockReturnValue({
+        collection: jest.fn().mockImplementation((name: string) => {
+          if (name === 'sessions') return mockSessionsCollection;
+          return { insertMany: jest.fn() };
+        }),
       });
 
       // Call calculateScoreWithRecovery

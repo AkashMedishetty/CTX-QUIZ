@@ -188,6 +188,7 @@ class BroadcastService {
         participants: participantList,
         totalQuestions: quiz?.questions?.length || 0,
         allowLateJoiners: session.allowLateJoiners ?? true,
+        examMode: session.examMode || null,
       };
 
       console.log('[Broadcast] Lobby state payload for controller:', {
@@ -197,6 +198,7 @@ class BroadcastService {
         participantsInList: participantList.length,
         totalQuestions: quiz?.questions?.length || 0,
         allowLateJoiners: session.allowLateJoiners ?? true,
+        examMode: session.examMode || null,
       });
 
       // Broadcast to controller channel only
@@ -511,7 +513,7 @@ class BroadcastService {
 
       // Start the quiz timer for this question
       // The timer will automatically broadcast timer_tick events every second
-      // and trigger the reveal phase when it expires
+      // and trigger the reveal phase when it expires (or next question in exam mode)
       await quizTimerManager.createTimer({
         sessionId,
         questionId,
@@ -522,8 +524,25 @@ class BroadcastService {
             questionId,
           });
 
-          // Trigger reveal_answers broadcast
-          await this.broadcastRevealAnswers(sessionId, questionId);
+          // Check if exam mode with skipRevealPhase or autoAdvance is enabled
+          const currentSession = await mongodbService.withRetry(async () => {
+            return await sessionsCollection.findOne({ sessionId });
+          });
+
+          const isExamModeSkipReveal = currentSession?.examMode?.skipRevealPhase === true;
+          const isExamModeAutoAdvance = currentSession?.examMode?.autoAdvance === true;
+
+          if (isExamModeSkipReveal || isExamModeAutoAdvance) {
+            // Exam mode: Skip REVEAL and go directly to next question
+            console.log('[Broadcast] Exam mode enabled - skipping REVEAL state on timer expiry', {
+              skipRevealPhase: isExamModeSkipReveal,
+              autoAdvance: isExamModeAutoAdvance,
+            });
+            await this.handleExamModeTimerExpiry(sessionId, questionId, questionIndex);
+          } else {
+            // Normal mode: Trigger reveal_answers broadcast
+            await this.broadcastRevealAnswers(sessionId, questionId);
+          }
         },
       });
 
@@ -671,6 +690,157 @@ class BroadcastService {
       console.log('[Broadcast] Successfully broadcasted reveal_answers for session:', sessionId);
     } catch (error) {
       console.error('[Broadcast] Error broadcasting reveal_answers:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Handle timer expiry in exam mode
+   * 
+   * When exam mode with skipRevealPhase is enabled, this method is called instead of
+   * broadcastRevealAnswers when the timer expires. It skips the REVEAL state and
+   * transitions directly to the next question or ends the quiz.
+   * 
+   * Requirements: 4.2, 4.4 - Skip REVEAL state in exam mode
+   * 
+   * @param sessionId - Session ID
+   * @param questionId - Current question ID that just expired
+   * @param currentQuestionIndex - Current question index
+   */
+  private async handleExamModeTimerExpiry(
+    sessionId: string,
+    questionId: string,
+    currentQuestionIndex: number
+  ): Promise<void> {
+    try {
+      console.log('[Broadcast] Handling exam mode timer expiry:', {
+        sessionId,
+        questionId,
+        currentQuestionIndex,
+      });
+
+      // Get session and quiz from MongoDB
+      const sessionsCollection = mongodbService.getCollection<Session>('sessions');
+      const session = await mongodbService.withRetry(async () => {
+        return await sessionsCollection.findOne({ sessionId });
+      });
+
+      if (!session) {
+        console.error('[Broadcast] Session not found for exam mode timer expiry:', sessionId);
+        throw new Error(`Session not found: ${sessionId}`);
+      }
+
+      const quizzesCollection = mongodbService.getCollection<Quiz>('quizzes');
+      const quiz = await mongodbService.withRetry(async () => {
+        return await quizzesCollection.findOne({ _id: session.quizId });
+      });
+
+      if (!quiz) {
+        console.error('[Broadcast] Quiz not found for exam mode timer expiry:', session.quizId);
+        throw new Error(`Quiz not found: ${session.quizId}`);
+      }
+
+      const nextQuestionIndex = currentQuestionIndex + 1;
+
+      // Broadcast timer_expired event to notify clients the question time is up
+      // This allows clients to show feedback before transitioning
+      await pubSubService.broadcastToSession(sessionId, 'timer_expired', {
+        questionId,
+        questionIndex: currentQuestionIndex,
+        examModeSkipReveal: true,
+        timestamp: Date.now(),
+      });
+
+      // Check if there are more questions
+      if (nextQuestionIndex >= quiz.questions.length) {
+        // No more questions - transition to ENDED state
+        console.log('[Broadcast] Exam mode: No more questions, ending quiz');
+
+        await redisDataStructuresService.updateSessionState(sessionId, {
+          state: 'ENDED',
+          currentQuestionIndex: currentQuestionIndex,
+        });
+
+        await mongodbService.withRetry(async () => {
+          await sessionsCollection.updateOne(
+            { sessionId },
+            { $set: { state: 'ENDED', endedAt: new Date() } }
+          );
+        });
+
+        // Get final leaderboard
+        const participantsCollection = mongodbService.getCollection<Participant>('participants');
+        const participants = await mongodbService.withRetry(async () => {
+          return await participantsCollection
+            .find({ sessionId, isActive: true })
+            .toArray();
+        });
+
+        const participantsWithScores = await Promise.all(
+          participants.map(async (p) => {
+            const participantSession = await redisDataStructuresService.getParticipantSession(p.participantId);
+            return {
+              ...p,
+              totalScore: participantSession?.totalScore ?? p.totalScore ?? 0,
+              totalTimeMs: participantSession?.totalTimeMs ?? p.totalTimeMs ?? 0,
+            };
+          })
+        );
+
+        participantsWithScores.sort((a, b) => {
+          if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
+          return a.totalTimeMs - b.totalTimeMs;
+        });
+
+        const finalLeaderboard = participantsWithScores.map((p, index) => ({
+          rank: index + 1,
+          participantId: p.participantId,
+          nickname: p.nickname,
+          totalScore: p.totalScore,
+          totalTimeMs: p.totalTimeMs,
+        }));
+
+        await this.broadcastQuizEnded(sessionId, finalLeaderboard);
+
+        console.log('[Broadcast] Exam mode: Quiz ended after timer expiry');
+      } else {
+        // More questions - go directly to next question
+        const nextQuestion = quiz.questions[nextQuestionIndex];
+
+        console.log('[Broadcast] Exam mode: Transitioning directly to next question:', {
+          sessionId,
+          nextQuestionIndex,
+          nextQuestionId: nextQuestion.questionId,
+        });
+
+        // Update state to ACTIVE_QUESTION with next question
+        await redisDataStructuresService.updateSessionState(sessionId, {
+          state: 'ACTIVE_QUESTION',
+          currentQuestionIndex: nextQuestionIndex,
+          currentQuestionId: nextQuestion.questionId,
+          currentQuestionStartTime: Date.now(),
+        });
+
+        await mongodbService.withRetry(async () => {
+          await sessionsCollection.updateOne(
+            { sessionId },
+            {
+              $set: {
+                state: 'ACTIVE_QUESTION',
+                currentQuestionIndex: nextQuestionIndex,
+                currentQuestionStartTime: new Date(),
+              },
+            }
+          );
+        });
+
+        // Broadcast question_started event (this also starts the timer)
+        await this.broadcastQuestionStarted(sessionId, nextQuestionIndex, nextQuestion.questionId);
+
+        console.log('[Broadcast] Exam mode: Successfully transitioned to next question');
+      }
+    } catch (error) {
+      console.error('[Broadcast] Error handling exam mode timer expiry:', error);
       throw error;
     }
   }
@@ -868,18 +1038,17 @@ class BroadcastService {
         throw new Error(`Session not found: ${sessionId}`);
       }
 
-      // Verify session is in ENDED state
-      // Check Redis first for most recent state, fallback to MongoDB
+      // Log current state for debugging (but don't skip broadcast)
+      // The state should already be ENDED by the time this is called,
+      // but we must not silently skip the broadcast if there's a race condition
       const redisState = await redisDataStructuresService.getSessionState(sessionId);
       const currentState = redisState?.state || session.state;
 
       if (currentState !== 'ENDED') {
-        console.warn('[Broadcast] Session is not in ENDED state:', {
+        console.warn('[Broadcast] Session is not in ENDED state but broadcasting anyway:', {
           sessionId,
           currentState,
         });
-        // Don't throw - just log warning and skip broadcast
-        return;
       }
 
       // Prepare quiz_ended payload
@@ -1128,6 +1297,81 @@ class BroadcastService {
     } catch (error) {
       console.error(`[Broadcast] Error broadcasting ${eventName} to big screen:`, error);
       throw error;
+    }
+  }
+
+  /**
+   * Broadcast participant_focus_changed event to controller
+   * 
+   * Called when a participant loses or regains focus (switches apps/tabs).
+   * Notifies the controller about participant focus status changes for exam monitoring.
+   * 
+   * The broadcast includes:
+   * - participantId: The participant whose focus changed
+   * - nickname: The participant's nickname
+   * - status: 'lost' or 'regained'
+   * - timestamp: Unix timestamp in milliseconds when the focus changed
+   * - totalLostCount: Total number of times focus has been lost
+   * - totalLostTimeMs: Total time in ms that focus has been lost
+   * 
+   * This helps the controller monitor participant focus during exams.
+   * 
+   * Requirements: 9.4, 9.5
+   * 
+   * This should be called:
+   * - When a participant's browser tab/window loses focus
+   * - When a participant's browser tab/window regains focus
+   * 
+   * @param sessionId - Session ID
+   * @param participantId - Participant ID whose focus changed
+   * @param nickname - Participant's nickname
+   * @param status - Focus status ('lost' or 'regained')
+   * @param timestamp - Timestamp when the focus change occurred
+   * @param totalLostCount - Total number of times focus has been lost
+   * @param totalLostTimeMs - Total time in ms that focus has been lost
+   */
+  async broadcastParticipantFocusChanged(
+    sessionId: string,
+    participantId: string,
+    nickname: string,
+    status: 'lost' | 'regained',
+    timestamp: number,
+    totalLostCount: number,
+    totalLostTimeMs: number
+  ): Promise<void> {
+    try {
+      console.log('[Broadcast] Broadcasting participant_focus_changed for session:', sessionId);
+
+      // Prepare participant_focus_changed payload
+      const focusPayload = {
+        participantId,
+        nickname,
+        status,
+        timestamp,
+        totalLostCount,
+        totalLostTimeMs,
+      };
+
+      console.log('[Broadcast] Participant focus payload:', {
+        sessionId,
+        participantId,
+        nickname,
+        status,
+        totalLostCount,
+        totalLostTimeMs,
+      });
+
+      // Broadcast to controller channel only
+      await pubSubService.publishToController(
+        sessionId,
+        'participant_focus_changed',
+        focusPayload
+      );
+
+      console.log('[Broadcast] Successfully broadcasted participant_focus_changed for session:', sessionId);
+    } catch (error) {
+      console.error('[Broadcast] Error broadcasting participant_focus_changed:', error);
+      // Don't throw - focus broadcast failure shouldn't fail the focus event handling
     }
   }
 }

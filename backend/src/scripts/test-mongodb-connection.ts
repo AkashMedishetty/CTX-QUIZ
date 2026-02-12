@@ -6,12 +6,13 @@
  * Usage: npm run test:mongodb
  */
 
+// Load environment variables FIRST before any other imports
 import dotenv from 'dotenv';
+dotenv.config();
+
+// Now import services that depend on config
 import { mongodbService } from '../services/mongodb.service';
 import { mongodbIndexesService } from '../services/mongodb-indexes.service';
-
-// Load environment variables
-dotenv.config();
 
 async function testConnection() {
   console.log('='.repeat(60));

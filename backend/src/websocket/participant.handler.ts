@@ -306,6 +306,8 @@ async function logDisconnectionEvent(
  * Handles:
  * - submit_answer (Task 17.1) ✓
  * - reconnect_session (Task 28.2) ✓
+ * - focus_lost (Task 5.6) ✓
+ * - focus_regained (Task 5.6) ✓
  * 
  * @param socket - Socket.IO socket instance
  */
@@ -318,6 +320,16 @@ function setupParticipantEventHandlers(socket: Socket): void {
   // Handle session reconnection
   socket.on('reconnect_session', async (data) => {
     await handleReconnectSession(socket, data);
+  });
+
+  // Handle focus lost event (Requirements: 9.4, 9.5, 9.6)
+  socket.on('focus_lost', async (data) => {
+    await handleFocusLost(socket, data);
+  });
+
+  // Handle focus regained event (Requirements: 9.4, 9.5, 9.6)
+  socket.on('focus_regained', async (data) => {
+    await handleFocusRegained(socket, data);
   });
 
   console.log('[Participant Handler] Event handlers set up for participant:', {
@@ -365,11 +377,21 @@ async function handleSubmitAnswer(socket: Socket, data: any): Promise<void> {
     // 1. Validate answer schema
     const submitAnswerSchema = z.object({
       questionId: z.string().uuid(),
-      selectedOptions: z.array(z.string().uuid()).min(1),
+      selectedOptions: z.array(z.string().uuid()),
       answerText: z.string().optional(),
       answerNumber: z.number().optional(),
       clientTimestamp: z.number(),
-    });
+    }).refine(
+      (data) => {
+        // At least one of: selectedOptions (non-empty), answerText, or answerNumber must be provided
+        return data.selectedOptions.length > 0 || 
+               data.answerText !== undefined || 
+               data.answerNumber !== undefined;
+      },
+      {
+        message: 'At least one answer type must be provided',
+      }
+    );
 
     const parseResult = submitAnswerSchema.safeParse(data);
 
@@ -805,5 +827,323 @@ async function logRecoveryEvent(
   } catch (error) {
     console.error('[Participant Handler] Error logging recovery event:', error);
     // Don't throw - logging failure shouldn't prevent recovery
+  }
+}
+
+/**
+ * Focus data stored in Redis
+ * Key: participant:{participantId}:focus
+ * 
+ * Requirements: 9.4, 9.5, 9.6
+ */
+interface ParticipantFocusData {
+  lastFocusLostAt: number | null;
+  totalFocusLostCount: number;
+  totalFocusLostTimeMs: number;
+  currentlyFocused: boolean;
+}
+
+/**
+ * Handle focus_lost event from participant
+ * 
+ * Called when a participant's browser tab/window loses focus (visibility hidden).
+ * This is used for exam mode monitoring to detect potential cheating.
+ * 
+ * 1. Validate focus_lost event schema (timestamp)
+ * 2. Update focus data in Redis (participant:{id}:focus)
+ * 3. Broadcast participant_focus_changed to controller
+ * 4. Log event to audit log
+ * 
+ * Requirements: 9.4, 9.5, 9.6
+ * 
+ * @param socket - Socket.IO socket instance
+ * @param data - Focus lost event data
+ */
+async function handleFocusLost(socket: Socket, data: any): Promise<void> {
+  const socketData = socket.data as SocketData;
+  const { participantId, sessionId, nickname } = socketData;
+
+  try {
+    console.log('[Participant Handler] Received focus_lost:', {
+      socketId: socket.id,
+      participantId,
+      sessionId,
+      data,
+    });
+
+    // Import validation schema
+    const { z } = await import('zod');
+
+    // 1. Validate focus_lost event schema
+    const focusLostSchema = z.object({
+      timestamp: z.number().positive(),
+    });
+
+    const parseResult = focusLostSchema.safeParse(data);
+
+    if (!parseResult.success) {
+      console.warn('[Participant Handler] Invalid focus_lost schema:', {
+        participantId,
+        errors: parseResult.error.errors,
+      });
+      return; // Silently ignore invalid events
+    }
+
+    const { timestamp } = parseResult.data;
+
+    // 2. Update focus data in Redis
+    const redis = redisService.getClient();
+    const focusKey = `participant:${participantId}:focus`;
+
+    // Get current focus data
+    const existingData = await redis.hgetall(focusKey);
+    
+    const currentFocusData: ParticipantFocusData = {
+      lastFocusLostAt: existingData.lastFocusLostAt ? parseInt(existingData.lastFocusLostAt, 10) : null,
+      totalFocusLostCount: existingData.totalFocusLostCount ? parseInt(existingData.totalFocusLostCount, 10) : 0,
+      totalFocusLostTimeMs: existingData.totalFocusLostTimeMs ? parseInt(existingData.totalFocusLostTimeMs, 10) : 0,
+      currentlyFocused: existingData.currentlyFocused !== 'false',
+    };
+
+    // Only process if currently focused (avoid duplicate events)
+    if (!currentFocusData.currentlyFocused) {
+      console.log('[Participant Handler] Ignoring duplicate focus_lost event:', {
+        participantId,
+      });
+      return;
+    }
+
+    // Update focus data
+    const updatedFocusData: ParticipantFocusData = {
+      lastFocusLostAt: timestamp,
+      totalFocusLostCount: currentFocusData.totalFocusLostCount + 1,
+      totalFocusLostTimeMs: currentFocusData.totalFocusLostTimeMs,
+      currentlyFocused: false,
+    };
+
+    // Store updated focus data in Redis
+    await redis.hset(focusKey, {
+      lastFocusLostAt: updatedFocusData.lastFocusLostAt!.toString(),
+      totalFocusLostCount: updatedFocusData.totalFocusLostCount.toString(),
+      totalFocusLostTimeMs: updatedFocusData.totalFocusLostTimeMs.toString(),
+      currentlyFocused: 'false',
+    });
+
+    // Set TTL to match session TTL (6 hours)
+    await redis.expire(focusKey, 6 * 60 * 60);
+
+    console.log('[Participant Handler] Updated focus data in Redis:', {
+      participantId,
+      focusData: updatedFocusData,
+    });
+
+    // 3. Broadcast participant_focus_changed to controller
+    try {
+      const { broadcastService } = await import('../services/broadcast.service');
+      await broadcastService.broadcastParticipantFocusChanged(
+        sessionId,
+        participantId!,
+        nickname || 'Unknown',
+        'lost',
+        timestamp,
+        updatedFocusData.totalFocusLostCount,
+        updatedFocusData.totalFocusLostTimeMs
+      );
+    } catch (error) {
+      console.error('[Participant Handler] Error broadcasting focus change:', error);
+      // Don't fail the event handling if broadcast fails
+    }
+
+    // 4. Log event to audit log
+    await logFocusEvent(participantId!, sessionId, 'FOCUS_LOST', {
+      timestamp,
+      totalFocusLostCount: updatedFocusData.totalFocusLostCount,
+      totalFocusLostTimeMs: updatedFocusData.totalFocusLostTimeMs,
+    });
+
+    console.log('[Participant Handler] Focus lost event processed successfully:', {
+      participantId,
+      timestamp,
+      totalFocusLostCount: updatedFocusData.totalFocusLostCount,
+    });
+
+  } catch (error) {
+    console.error('[Participant Handler] Error handling focus_lost:', error);
+    // Don't emit error to client - focus monitoring should be silent
+  }
+}
+
+/**
+ * Handle focus_regained event from participant
+ * 
+ * Called when a participant's browser tab/window regains focus (visibility visible).
+ * This is used for exam mode monitoring to track how long participants were away.
+ * 
+ * 1. Validate focus_regained event schema (timestamp, durationMs)
+ * 2. Update focus data in Redis (participant:{id}:focus)
+ * 3. Broadcast participant_focus_changed to controller
+ * 4. Log event to audit log
+ * 
+ * Requirements: 9.4, 9.5, 9.6
+ * 
+ * @param socket - Socket.IO socket instance
+ * @param data - Focus regained event data
+ */
+async function handleFocusRegained(socket: Socket, data: any): Promise<void> {
+  const socketData = socket.data as SocketData;
+  const { participantId, sessionId, nickname } = socketData;
+
+  try {
+    console.log('[Participant Handler] Received focus_regained:', {
+      socketId: socket.id,
+      participantId,
+      sessionId,
+      data,
+    });
+
+    // Import validation schema
+    const { z } = await import('zod');
+
+    // 1. Validate focus_regained event schema
+    const focusRegainedSchema = z.object({
+      timestamp: z.number().positive(),
+      durationMs: z.number().nonnegative(),
+    });
+
+    const parseResult = focusRegainedSchema.safeParse(data);
+
+    if (!parseResult.success) {
+      console.warn('[Participant Handler] Invalid focus_regained schema:', {
+        participantId,
+        errors: parseResult.error.errors,
+      });
+      return; // Silently ignore invalid events
+    }
+
+    const { timestamp, durationMs } = parseResult.data;
+
+    // 2. Update focus data in Redis
+    const redis = redisService.getClient();
+    const focusKey = `participant:${participantId}:focus`;
+
+    // Get current focus data
+    const existingData = await redis.hgetall(focusKey);
+    
+    const currentFocusData: ParticipantFocusData = {
+      lastFocusLostAt: existingData.lastFocusLostAt ? parseInt(existingData.lastFocusLostAt, 10) : null,
+      totalFocusLostCount: existingData.totalFocusLostCount ? parseInt(existingData.totalFocusLostCount, 10) : 0,
+      totalFocusLostTimeMs: existingData.totalFocusLostTimeMs ? parseInt(existingData.totalFocusLostTimeMs, 10) : 0,
+      currentlyFocused: existingData.currentlyFocused !== 'false',
+    };
+
+    // Only process if currently not focused (avoid duplicate events)
+    if (currentFocusData.currentlyFocused) {
+      console.log('[Participant Handler] Ignoring duplicate focus_regained event:', {
+        participantId,
+      });
+      return;
+    }
+
+    // Update focus data with accumulated lost time
+    const updatedFocusData: ParticipantFocusData = {
+      lastFocusLostAt: null, // Clear since focus is regained
+      totalFocusLostCount: currentFocusData.totalFocusLostCount,
+      totalFocusLostTimeMs: currentFocusData.totalFocusLostTimeMs + durationMs,
+      currentlyFocused: true,
+    };
+
+    // Store updated focus data in Redis
+    await redis.hset(focusKey, {
+      lastFocusLostAt: '', // Clear the value
+      totalFocusLostCount: updatedFocusData.totalFocusLostCount.toString(),
+      totalFocusLostTimeMs: updatedFocusData.totalFocusLostTimeMs.toString(),
+      currentlyFocused: 'true',
+    });
+
+    // Set TTL to match session TTL (6 hours)
+    await redis.expire(focusKey, 6 * 60 * 60);
+
+    console.log('[Participant Handler] Updated focus data in Redis:', {
+      participantId,
+      focusData: updatedFocusData,
+    });
+
+    // 3. Broadcast participant_focus_changed to controller
+    try {
+      const { broadcastService } = await import('../services/broadcast.service');
+      await broadcastService.broadcastParticipantFocusChanged(
+        sessionId,
+        participantId!,
+        nickname || 'Unknown',
+        'regained',
+        timestamp,
+        updatedFocusData.totalFocusLostCount,
+        updatedFocusData.totalFocusLostTimeMs
+      );
+    } catch (error) {
+      console.error('[Participant Handler] Error broadcasting focus change:', error);
+      // Don't fail the event handling if broadcast fails
+    }
+
+    // 4. Log event to audit log
+    await logFocusEvent(participantId!, sessionId, 'FOCUS_REGAINED', {
+      timestamp,
+      durationMs,
+      totalFocusLostCount: updatedFocusData.totalFocusLostCount,
+      totalFocusLostTimeMs: updatedFocusData.totalFocusLostTimeMs,
+    });
+
+    console.log('[Participant Handler] Focus regained event processed successfully:', {
+      participantId,
+      timestamp,
+      durationMs,
+      totalFocusLostTimeMs: updatedFocusData.totalFocusLostTimeMs,
+    });
+
+  } catch (error) {
+    console.error('[Participant Handler] Error handling focus_regained:', error);
+    // Don't emit error to client - focus monitoring should be silent
+  }
+}
+
+/**
+ * Log focus event to audit logs
+ * 
+ * Requirements: 9.6 - Log all focus events in the audit log for post-quiz review
+ * 
+ * @param participantId - Participant ID
+ * @param sessionId - Session ID
+ * @param eventType - Type of focus event
+ * @param details - Additional event details
+ */
+async function logFocusEvent(
+  participantId: string,
+  sessionId: string,
+  eventType: 'FOCUS_LOST' | 'FOCUS_REGAINED',
+  details: Record<string, any>
+): Promise<void> {
+  try {
+    const db = mongodbService.getDb();
+    const auditLogsCollection = db.collection('auditLogs');
+
+    await auditLogsCollection.insertOne({
+      timestamp: new Date(),
+      eventType: eventType as any,
+      sessionId,
+      participantId,
+      details: {
+        ...details,
+        timestamp: new Date().toISOString(),
+      },
+    });
+
+    console.log('[Participant Handler] Logged focus event:', {
+      eventType,
+      participantId,
+      sessionId,
+    });
+  } catch (error) {
+    console.error('[Participant Handler] Error logging focus event:', error);
+    // Don't throw - logging failure shouldn't prevent focus event handling
   }
 }

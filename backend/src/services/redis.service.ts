@@ -280,6 +280,19 @@ class RedisService {
   }
 
   /**
+   * Create a dedicated subscriber client for isolated pub/sub usage.
+   * This prevents message handler conflicts when multiple services
+   * need to subscribe to different channels on the same Redis instance.
+   */
+  async createDedicatedSubscriber(name: string): Promise<Redis> {
+    const options = this.createClientOptions();
+    const sub = new Redis(options);
+    this.setupEventHandlers(sub, `DedicatedSubscriber-${name}`);
+    await sub.connect();
+    return sub;
+  }
+
+  /**
    * Get connection status
    */
   getStatus(): {

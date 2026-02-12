@@ -30,7 +30,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui';
-import { cn } from '@/lib/utils';
+import { cn, getImageUrl } from '@/lib/utils';
 import { uploadFile } from '@/lib/api-client';
 import { RichTextEditor } from './rich-text-editor';
 import { OptionBuilder, type OptionData } from './option-builder';
@@ -38,7 +38,7 @@ import { OptionBuilder, type OptionData } from './option-builder';
 /**
  * Question type options
  */
-export type QuestionType = 'MULTIPLE_CHOICE' | 'MULTI_SELECT' | 'TRUE_FALSE';
+export type QuestionType = 'MULTIPLE_CHOICE' | 'MULTI_SELECT' | 'TRUE_FALSE' | 'SCALE_1_10' | 'NUMBER_INPUT' | 'OPEN_ENDED';
 
 /**
  * Scoring configuration
@@ -48,6 +48,10 @@ export interface ScoringConfig {
   speedBonusEnabled: boolean;
   speedBonusMultiplier: number;
   partialCreditEnabled: boolean;
+  negativeMarkingOverride?: {
+    enabled: boolean;
+    percentage: number; // 0-100
+  };
 }
 
 
@@ -106,7 +110,7 @@ const DEFAULT_MC_OPTIONS: OptionData[] = [
  */
 const questionFormSchema = z.object({
   questionText: z.string().min(1, 'Question text is required'),
-  questionType: z.enum(['MULTIPLE_CHOICE', 'MULTI_SELECT', 'TRUE_FALSE']),
+  questionType: z.enum(['MULTIPLE_CHOICE', 'MULTI_SELECT', 'TRUE_FALSE', 'SCALE_1_10', 'NUMBER_INPUT', 'OPEN_ENDED']),
   questionImageUrl: z.string().optional(),
   timeLimit: z.number().min(5, 'Minimum 5 seconds').max(120, 'Maximum 120 seconds'),
   options: z.array(z.object({
@@ -114,24 +118,43 @@ const questionFormSchema = z.object({
     optionText: z.string(),
     optionImageUrl: z.string().optional(),
     isCorrect: z.boolean(),
-  })).min(2, 'At least 2 options required'),
+  })).min(1, 'At least 1 option required'),
   scoring: z.object({
     basePoints: z.number().min(0, 'Points must be positive').max(10000, 'Maximum 10000 points'),
     speedBonusEnabled: z.boolean(),
     speedBonusMultiplier: z.number().min(0.1).max(2.0),
     partialCreditEnabled: z.boolean(),
+    negativeMarkingOverride: z.object({
+      enabled: z.boolean(),
+      percentage: z.number().min(0).max(100),
+    }).optional(),
   }),
   speakerNotes: z.string().optional(),
   explanationText: z.string().optional(),
   shuffleOptions: z.boolean(),
 }).refine((data) => {
-  // Ensure at least one correct answer
+  // For most question types, require at least 2 options
+  if (data.questionType !== 'NUMBER_INPUT' && data.questionType !== 'OPEN_ENDED') {
+    return data.options.length >= 2;
+  }
+  return true;
+}, {
+  message: 'At least 2 options required',
+  path: ['options'],
+}).refine((data) => {
+  // Ensure at least one correct answer (except for NUMBER_INPUT and OPEN_ENDED)
+  if (data.questionType === 'NUMBER_INPUT' || data.questionType === 'OPEN_ENDED') {
+    return true;
+  }
   return data.options.some(opt => opt.isCorrect);
 }, {
   message: 'At least one option must be marked as correct',
   path: ['options'],
 }).refine((data) => {
-  // Ensure all options have text
+  // Ensure all options have text (except for NUMBER_INPUT where it's the expected answer)
+  if (data.questionType === 'NUMBER_INPUT') {
+    return true;
+  }
   return data.options.every(opt => opt.optionText.trim().length > 0);
 }, {
   message: 'All options must have text',
@@ -319,6 +342,9 @@ const questionTypeDescriptions: Record<QuestionType, string> = {
   MULTIPLE_CHOICE: 'Single correct answer from multiple options',
   MULTI_SELECT: 'Multiple correct answers can be selected',
   TRUE_FALSE: 'Simple true or false question',
+  SCALE_1_10: 'Rating scale from 1 to 10',
+  NUMBER_INPUT: 'Participants enter a numeric answer',
+  OPEN_ENDED: 'Free text response (manually graded)',
 };
 
 
@@ -365,6 +391,27 @@ export function QuestionBuilder({
       setValue('options', [
         { id: generateOptionId(), optionText: 'True', isCorrect: false },
         { id: generateOptionId(), optionText: 'False', isCorrect: false },
+      ]);
+      setValue('scoring.partialCreditEnabled', false);
+    } else if (newType === 'SCALE_1_10') {
+      // Generate 10 options for scale questions
+      const scaleOptions = Array.from({ length: 10 }, (_, i) => ({
+        id: generateOptionId(),
+        optionText: String(i + 1),
+        isCorrect: false,
+      }));
+      setValue('options', scaleOptions);
+      setValue('scoring.partialCreditEnabled', false);
+    } else if (newType === 'NUMBER_INPUT') {
+      // Number input has a single "correct answer" option for the expected value
+      setValue('options', [
+        { id: generateOptionId(), optionText: '', isCorrect: true },
+      ]);
+      setValue('scoring.partialCreditEnabled', false);
+    } else if (newType === 'OPEN_ENDED') {
+      // Open ended has no predefined options - manually graded
+      setValue('options', [
+        { id: generateOptionId(), optionText: 'Open response', isCorrect: true },
       ]);
       setValue('scoring.partialCreditEnabled', false);
     } else if (newType === 'MULTIPLE_CHOICE') {
@@ -443,6 +490,9 @@ export function QuestionBuilder({
                     <SelectItem value="MULTIPLE_CHOICE">Multiple Choice</SelectItem>
                     <SelectItem value="MULTI_SELECT">Multi-Select</SelectItem>
                     <SelectItem value="TRUE_FALSE">True / False</SelectItem>
+                    <SelectItem value="SCALE_1_10">Scale 1-10</SelectItem>
+                    <SelectItem value="NUMBER_INPUT">Number Input</SelectItem>
+                    <SelectItem value="OPEN_ENDED">Open Ended</SelectItem>
                   </SelectContent>
                 </Select>
                 <div className="flex items-start gap-2 mt-2 p-3 rounded-md bg-primary/5 border border-primary/10">
@@ -480,7 +530,7 @@ export function QuestionBuilder({
             {questionImageUrl ? (
               <div className="relative inline-block">
                 <img
-                  src={questionImageUrl}
+                  src={getImageUrl(questionImageUrl)}
                   alt="Question image"
                   className="max-h-48 rounded-lg object-cover shadow-md"
                 />
@@ -533,19 +583,81 @@ export function QuestionBuilder({
 
 
       {/* Answer Options Section */}
-      <FormSection title="Answer Options" description="Add answer options and mark correct answers">
-        <Controller
-          name="options"
-          control={control}
-          render={({ field }: { field: ControllerRenderProps<QuestionFormData, 'options'> }) => (
-            <OptionBuilder
-              options={field.value}
-              onChange={field.onChange}
-              questionType={questionType}
-              error={errors.options?.message || (errors.options as unknown as { root?: { message?: string } })?.root?.message}
-            />
-          )}
-        />
+      <FormSection 
+        title="Answer Options" 
+        description={
+          questionType === 'NUMBER_INPUT' 
+            ? 'Enter the correct numeric answer'
+            : questionType === 'OPEN_ENDED'
+            ? 'Open-ended questions are manually graded'
+            : questionType === 'SCALE_1_10'
+            ? 'Select which scale value(s) are correct'
+            : 'Add answer options and mark correct answers'
+        }
+      >
+        {questionType === 'NUMBER_INPUT' ? (
+          <Controller
+            name="options"
+            control={control}
+            render={({ field }: { field: ControllerRenderProps<QuestionFormData, 'options'> }) => (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-body-sm font-medium text-[var(--text-primary)] mb-2">
+                    Correct Answer (Number)
+                  </label>
+                  <input
+                    type="number"
+                    value={field.value[0]?.optionText || ''}
+                    onChange={(e) => {
+                      const newOptions = [...field.value];
+                      if (newOptions[0]) {
+                        newOptions[0] = { ...newOptions[0], optionText: e.target.value };
+                      }
+                      field.onChange(newOptions);
+                    }}
+                    placeholder="Enter the correct number..."
+                    className={cn(
+                      'w-full rounded-md p-4 bg-[var(--neu-bg)]',
+                      'shadow-[inset_3px_3px_6px_var(--shadow-dark),inset_-3px_-3px_6px_var(--shadow-light)]',
+                      'text-[var(--text-primary)] placeholder:text-[var(--text-muted)] transition-all duration-fast',
+                      'focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2'
+                    )}
+                  />
+                  <p className="mt-2 text-body-sm text-[var(--text-muted)]">
+                    Participants will enter a number. Their answer will be compared to this value.
+                  </p>
+                </div>
+              </div>
+            )}
+          />
+        ) : questionType === 'OPEN_ENDED' ? (
+          <div className="p-4 rounded-lg bg-primary/5 border border-primary/10">
+            <div className="flex items-start gap-3">
+              <InfoIcon className="text-primary flex-shrink-0 mt-0.5" />
+              <div>
+                <p className="text-body font-medium text-[var(--text-primary)]">
+                  Open-Ended Question
+                </p>
+                <p className="text-body-sm text-[var(--text-secondary)] mt-1">
+                  Participants will type a free-form text response. These answers require manual grading by the host after the quiz.
+                </p>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <Controller
+            name="options"
+            control={control}
+            render={({ field }: { field: ControllerRenderProps<QuestionFormData, 'options'> }) => (
+              <OptionBuilder
+                options={field.value}
+                onChange={field.onChange}
+                questionType={questionType}
+                error={errors.options?.message || (errors.options as unknown as { root?: { message?: string } })?.root?.message}
+              />
+            )}
+          />
+        )}
       </FormSection>
 
       {/* Timing Section */}
@@ -706,6 +818,66 @@ export function QuestionBuilder({
               )}
             />
           )}
+
+          {/* Negative Marking Override */}
+          <div className="space-y-3 pt-4 border-t border-[var(--border)]">
+            <Controller
+              name="scoring.negativeMarkingOverride.enabled"
+              control={control}
+              render={({ field }: { field: ControllerRenderProps<QuestionFormData, 'scoring.negativeMarkingOverride.enabled'> }) => (
+                <ToggleSwitch
+                  checked={field.value || false}
+                  onChange={field.onChange}
+                  label="Override Negative Marking"
+                  description="Set a custom negative marking percentage for this question"
+                />
+              )}
+            />
+            <AnimatePresence>
+              {scoring.negativeMarkingOverride?.enabled && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  exit={{ opacity: 0, height: 0 }}
+                  transition={{ duration: 0.2 }}
+                  className="pl-14"
+                >
+                  <Controller
+                    name="scoring.negativeMarkingOverride.percentage"
+                    control={control}
+                    render={({ field }: { field: ControllerRenderProps<QuestionFormData, 'scoring.negativeMarkingOverride.percentage'> }) => (
+                      <div>
+                        <label className="block text-body-sm font-medium text-[var(--text-primary)] mb-2">
+                          Deduction Percentage
+                        </label>
+                        <div className="flex items-center gap-4">
+                          <input
+                            type="range"
+                            min={0}
+                            max={100}
+                            step={5}
+                            value={field.value || 0}
+                            onChange={(e) => field.onChange(Number(e.target.value))}
+                            className="flex-1 h-2 rounded-full appearance-none cursor-pointer bg-[var(--neu-bg)] shadow-[inset_2px_2px_4px_var(--shadow-dark),inset_-2px_-2px_4px_var(--shadow-light)]"
+                            style={{ accentColor: 'var(--primary)' }}
+                          />
+                          <span className="text-body font-semibold text-primary min-w-[3rem] text-right">
+                            {field.value || 0}%
+                          </span>
+                        </div>
+                        <p className="mt-2 text-body-sm text-[var(--text-muted)]">
+                          {field.value === 0 
+                            ? 'No points will be deducted for wrong answers on this question.'
+                            : `${field.value}% of base points (${Math.floor(scoring.basePoints * (field.value || 0) / 100)} pts) will be deducted.`
+                          }
+                        </p>
+                      </div>
+                    )}
+                  />
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
 
           {/* Shuffle Options */}
           <Controller

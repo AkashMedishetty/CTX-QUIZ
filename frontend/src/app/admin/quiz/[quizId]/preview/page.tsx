@@ -19,7 +19,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useQuery } from '@tanstack/react-query';
 import { get } from '@/lib/api-client';
 import { Button } from '@/components/ui';
-import { cn } from '@/lib/utils';
+import { cn, getImageUrl } from '@/lib/utils';
 
 /**
  * Question interface from API
@@ -399,7 +399,7 @@ function QuestionCard({
         {question.questionImageUrl && (
           <div className="mb-4 rounded-lg overflow-hidden">
             <img
-              src={question.questionImageUrl}
+              src={getImageUrl(question.questionImageUrl)}
               alt="Question"
               className="w-full max-h-64 object-contain bg-[var(--neu-surface)]"
             />

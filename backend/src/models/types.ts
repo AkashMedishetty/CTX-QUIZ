@@ -13,6 +13,7 @@ export type QuizType = 'REGULAR' | 'ELIMINATION' | 'FFI';
 
 export type QuestionType =
   | 'MULTIPLE_CHOICE'
+  | 'MULTI_SELECT'
   | 'TRUE_FALSE'
   | 'SCALE_1_10'
   | 'NUMBER_INPUT'
@@ -39,6 +40,22 @@ export interface Scoring {
   basePoints: number;
   speedBonusMultiplier: number; // 0-1
   partialCreditEnabled: boolean;
+  negativeMarkingOverride?: {
+    enabled: boolean;
+    percentage: number; // 0-100
+  };
+}
+
+/**
+ * Quiz-level exam settings
+ * Applied to all questions unless overridden at question level
+ */
+export interface QuizExamSettings {
+  negativeMarkingEnabled: boolean;
+  negativeMarkingPercentage: number; // 5-100, default 25
+  focusMonitoringEnabled: boolean;
+  skipRevealPhase: boolean;
+  autoAdvance: boolean;
 }
 
 export interface Option {
@@ -72,6 +89,7 @@ export interface Quiz {
   branding: Branding;
   eliminationSettings?: EliminationSettings;
   ffiSettings?: FFISettings;
+  examSettings?: QuizExamSettings;
   questions: Question[];
 }
 
@@ -80,6 +98,23 @@ export interface Quiz {
 // ============================================================================
 
 export type SessionState = 'LOBBY' | 'ACTIVE_QUESTION' | 'REVEAL' | 'ENDED';
+
+/**
+ * Exam Mode Configuration
+ * Settings for running quizzes in exam mode with enhanced controls
+ */
+export interface ExamModeConfig {
+  /** Skip reveal/analytics phase - go directly to next question */
+  skipRevealPhase: boolean;
+  /** Enable negative marking for wrong answers */
+  negativeMarkingEnabled: boolean;
+  /** Negative marking percentage (0-100) - deduction = basePoints × percentage / 100 */
+  negativeMarkingPercentage: number;
+  /** Enable focus monitoring to detect when participants switch apps/windows */
+  focusMonitoringEnabled: boolean;
+  /** Auto-advance to next question after time expires */
+  autoAdvance: boolean;
+}
 
 export interface Session {
   _id?: ObjectId;
@@ -94,6 +129,12 @@ export interface Session {
   eliminatedParticipants: string[]; // for ELIMINATION quizzes
   voidedQuestions: string[]; // question IDs
   allowLateJoiners: boolean; // whether to allow joining after quiz starts
+  /** Exam mode configuration - enables exam-specific features */
+  examMode?: ExamModeConfig;
+  /** Tournament ID if this session is part of a tournament */
+  tournamentId?: string;
+  /** Tournament round number (1-indexed) if this session is part of a tournament */
+  tournamentRoundNumber?: number;
   createdAt: Date;
   startedAt?: Date;
   endedAt?: Date;
@@ -142,6 +183,8 @@ export interface Answer {
   speedBonusApplied: number;
   streakBonusApplied: number;
   partialCreditApplied: boolean;
+  /** Negative marking deduction applied for incorrect answers */
+  negativeDeductionApplied: number;
 }
 
 // ============================================================================
@@ -216,4 +259,70 @@ export interface LeaderboardEntry {
   lastQuestionScore?: number;
   streakCount: number;
   totalTimeMs: number;
+}
+
+
+// ============================================================================
+// Tournament Types
+// ============================================================================
+
+export type TournamentState = 'DRAFT' | 'LOBBY' | 'IN_PROGRESS' | 'COMPLETED';
+
+export type ProgressionType = 'TOP_N' | 'TOP_PERCENTAGE';
+
+export interface ProgressionRules {
+  type: ProgressionType;
+  value: number; // N participants or X%
+  scoreCarryOver: boolean; // Whether scores carry to next round
+}
+
+export interface TournamentRound {
+  roundNumber: number;
+  quizId: ObjectId;
+  sessionId?: string;
+  qualifiedParticipants: string[]; // participantIds who can join this round
+  state: 'PENDING' | 'ACTIVE' | 'COMPLETED';
+  startedAt?: Date;
+  endedAt?: Date;
+}
+
+export interface Tournament {
+  _id?: ObjectId;
+  tournamentId: string; // UUID
+  title: string;
+  description: string;
+  branding: Branding;
+  rounds: TournamentRound[];
+  progressionRules: ProgressionRules;
+  state: TournamentState;
+  currentRoundIndex: number;
+  createdAt: Date;
+  startedAt?: Date;
+  endedAt?: Date;
+  hostId: string;
+}
+
+export interface CreateTournamentRequest {
+  title: string;
+  description: string;
+  branding?: Branding;
+  progressionRules: ProgressionRules;
+}
+
+export interface TournamentBracket {
+  tournamentId: string;
+  title: string;
+  state: TournamentState;
+  currentRoundIndex: number;
+  rounds: Array<{
+    roundNumber: number;
+    state: 'PENDING' | 'ACTIVE' | 'COMPLETED';
+    participants: Array<{
+      participantId: string;
+      nickname: string;
+      score: number;
+      isQualified: boolean;
+      isEliminated: boolean;
+    }>;
+  }>;
 }

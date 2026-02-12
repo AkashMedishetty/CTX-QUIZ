@@ -19,6 +19,7 @@ import { redisDataStructuresService } from '../services/redis-data-structures.se
 import { broadcastService, systemMetricsBroadcastManager } from '../services/broadcast.service';
 import { pubSubService } from '../services/pubsub.service';
 import { quizTimerManager } from '../services/quiz-timer.service';
+import { scoringService } from '../services/scoring.service';
 import { Session, Quiz, Participant } from '../models/types';
 
 /**
@@ -220,6 +221,7 @@ async function getCurrentSessionState(sessionId: string): Promise<{
   participantCount: number;
   currentQuestion?: any;
   remainingTime?: number;
+  examMode?: any;
 }> {
   const redis = redisService.getClient();
 
@@ -263,6 +265,7 @@ async function getCurrentSessionState(sessionId: string): Promise<{
     state: session.state,
     currentQuestionIndex: session.currentQuestionIndex,
     participantCount: session.participantCount,
+    examMode: session.examMode,
   };
 }
 
@@ -388,9 +391,11 @@ async function handleStartQuiz(
     });
 
     // Transition session to ACTIVE_QUESTION state
+    // CRITICAL: Must include currentQuestionId for answer validation to work
     await redisDataStructuresService.updateSessionState(data.sessionId, {
       state: 'ACTIVE_QUESTION',
       currentQuestionIndex: 0,
+      currentQuestionId: firstQuestion.questionId,
       currentQuestionStartTime: Date.now(),
     });
 
@@ -407,7 +412,19 @@ async function handleStartQuiz(
       }
     );
 
-    console.log('[Controller Handler] Session state transitioned to ACTIVE_QUESTION');
+    console.log('[Controller Handler] Session state transitioned to ACTIVE_QUESTION:', {
+      sessionId: data.sessionId,
+      currentQuestionId: firstQuestion.questionId,
+    });
+
+    // Subscribe scoring service to this session's scoring channel
+    try {
+      await scoringService.subscribeToSession(data.sessionId);
+      console.log('[Controller Handler] Scoring service subscribed to session');
+    } catch (error) {
+      console.error('[Controller Handler] Error subscribing scoring service:', error);
+      // Continue - scoring can still work via direct processing
+    }
 
     // Broadcast quiz_started event
     await broadcastService.broadcastQuizStarted(
@@ -499,17 +516,44 @@ async function handleNextQuestion(
       return;
     }
 
-    // Verify session is in REVEAL state
     // Check Redis first for most recent state
     const redisState = await redisDataStructuresService.getSessionState(data.sessionId);
     const currentState = redisState?.state || session.state;
 
-    if (currentState !== 'REVEAL') {
+    // Check if exam mode with skipRevealPhase is enabled
+    // In exam mode, we can transition directly from ACTIVE_QUESTION to next ACTIVE_QUESTION
+    // Requirements: 4.2, 4.4 - Skip REVEAL state in exam mode
+    const isExamModeSkipReveal = session.examMode?.skipRevealPhase === true;
+    const isExamModeAutoAdvance = session.examMode?.autoAdvance === true;
+
+    // Verify session is in valid state for next question
+    // Normal mode: Must be in REVEAL state
+    // Exam mode with skipRevealPhase or autoAdvance: Can be in REVEAL or ACTIVE_QUESTION state
+    const validStates = (isExamModeSkipReveal || isExamModeAutoAdvance)
+      ? ['REVEAL', 'ACTIVE_QUESTION'] 
+      : ['REVEAL'];
+
+    if (!validStates.includes(currentState)) {
+      const stateRequirement = (isExamModeSkipReveal || isExamModeAutoAdvance)
+        ? 'REVEAL or ACTIVE_QUESTION' 
+        : 'REVEAL';
       socket.emit('error', {
         event: 'next_question',
-        error: `Cannot advance to next question from ${currentState} state. Must be in REVEAL state.`,
+        error: `Cannot advance to next question from ${currentState} state. Must be in ${stateRequirement} state.`,
       });
       return;
+    }
+
+    // If in ACTIVE_QUESTION state (exam mode), stop the current timer first
+    if (currentState === 'ACTIVE_QUESTION' && (isExamModeSkipReveal || isExamModeAutoAdvance)) {
+      const currentQuestionId = redisState?.currentQuestionId;
+      if (currentQuestionId) {
+        const timer = quizTimerManager.getTimer(data.sessionId, currentQuestionId);
+        if (timer) {
+          timer.stop();
+          console.log('[Controller Handler] Stopped active timer for exam mode direct transition');
+        }
+      }
     }
 
     // Get quiz to find questions
@@ -557,21 +601,46 @@ async function handleNextQuestion(
         }
       );
 
-      // Calculate final leaderboard from MongoDB (authoritative source)
+      // Get participants from MongoDB (for nicknames and metadata)
       const participantsCollection = db.collection<Participant>('participants');
       const participants = await participantsCollection
         .find({ 
           sessionId: data.sessionId,
           isActive: true, // Only include active participants
         })
-        .sort({ 
-          totalScore: -1,  // Sort by score descending
-          totalTimeMs: 1,  // Then by time ascending (lower time ranks higher)
-        })
         .toArray();
 
+      // Get scores from Redis (authoritative source during gameplay)
+      const participantsWithScores = await Promise.all(
+        participants.map(async (p) => {
+          const participantSession = await redisDataStructuresService.getParticipantSession(p.participantId);
+          const totalScore = participantSession?.totalScore ?? p.totalScore ?? 0;
+          const totalTimeMs = participantSession?.totalTimeMs ?? p.totalTimeMs ?? 0;
+          
+          // Also update MongoDB with final scores for persistence
+          await participantsCollection.updateOne(
+            { participantId: p.participantId },
+            { $set: { totalScore, totalTimeMs } }
+          );
+          
+          return {
+            ...p,
+            totalScore,
+            totalTimeMs,
+          };
+        })
+      );
+
+      // Sort by score descending, then by time ascending (lower time ranks higher)
+      participantsWithScores.sort((a, b) => {
+        if (b.totalScore !== a.totalScore) {
+          return b.totalScore - a.totalScore;
+        }
+        return a.totalTimeMs - b.totalTimeMs;
+      });
+
       // Format final leaderboard with ranks
-      const finalLeaderboard = participants.map((p, index) => ({
+      const finalLeaderboard = participantsWithScores.map((p, index) => ({
         rank: index + 1,
         participantId: p.participantId,
         nickname: p.nickname,
@@ -586,6 +655,15 @@ async function handleNextQuestion(
 
       // Broadcast quiz_ended event with final leaderboard
       await broadcastService.broadcastQuizEnded(data.sessionId, finalLeaderboard);
+
+      // Unsubscribe scoring service from this session
+      try {
+        await scoringService.unsubscribeFromSession(data.sessionId);
+        console.log('[Controller Handler] Scoring service unsubscribed from session');
+      } catch (error) {
+        console.error('[Controller Handler] Error unsubscribing scoring service:', error);
+        // Continue - cleanup can happen later
+      }
 
       // Send acknowledgment to controller
       socket.emit('next_question_ack', {
@@ -606,9 +684,11 @@ async function handleNextQuestion(
     const nextQuestion = quiz.questions[nextQuestionIndex];
 
     // Transition session to ACTIVE_QUESTION state
+    // CRITICAL: Must include currentQuestionId for answer validation to work
     await redisDataStructuresService.updateSessionState(data.sessionId, {
       state: 'ACTIVE_QUESTION',
       currentQuestionIndex: nextQuestionIndex,
+      currentQuestionId: nextQuestion.questionId,
       currentQuestionStartTime: Date.now(),
     });
 
@@ -624,7 +704,10 @@ async function handleNextQuestion(
       }
     );
 
-    console.log('[Controller Handler] Session state transitioned to ACTIVE_QUESTION');
+    console.log('[Controller Handler] Session state transitioned to ACTIVE_QUESTION:', {
+      sessionId: data.sessionId,
+      currentQuestionId: nextQuestion.questionId,
+    });
 
     // Broadcast question_started event (this also starts the timer)
     await broadcastService.broadcastQuestionStarted(
@@ -755,21 +838,46 @@ async function handleEndQuiz(
       }
     );
 
-    // Calculate final leaderboard from MongoDB (authoritative source)
+    // Get participants from MongoDB (for nicknames and metadata)
     const participantsCollection = db.collection<Participant>('participants');
     const participants = await participantsCollection
       .find({ 
         sessionId: data.sessionId,
         isActive: true,
       })
-      .sort({ 
-        totalScore: -1,
-        totalTimeMs: 1,
-      })
       .toArray();
 
+    // Get scores from Redis (authoritative source during gameplay)
+    const participantsWithScores = await Promise.all(
+      participants.map(async (p) => {
+        const participantSession = await redisDataStructuresService.getParticipantSession(p.participantId);
+        const totalScore = participantSession?.totalScore ?? p.totalScore ?? 0;
+        const totalTimeMs = participantSession?.totalTimeMs ?? p.totalTimeMs ?? 0;
+        
+        // Also update MongoDB with final scores for persistence
+        await participantsCollection.updateOne(
+          { participantId: p.participantId },
+          { $set: { totalScore, totalTimeMs } }
+        );
+        
+        return {
+          ...p,
+          totalScore,
+          totalTimeMs,
+        };
+      })
+    );
+
+    // Sort by score descending, then by time ascending (lower time ranks higher)
+    participantsWithScores.sort((a, b) => {
+      if (b.totalScore !== a.totalScore) {
+        return b.totalScore - a.totalScore;
+      }
+      return a.totalTimeMs - b.totalTimeMs;
+    });
+
     // Format final leaderboard with ranks
-    const finalLeaderboard = participants.map((p, index) => ({
+    const finalLeaderboard = participantsWithScores.map((p, index) => ({
       rank: index + 1,
       participantId: p.participantId,
       nickname: p.nickname,
@@ -784,6 +892,15 @@ async function handleEndQuiz(
 
     // Broadcast quiz_ended event with final leaderboard
     await broadcastService.broadcastQuizEnded(data.sessionId, finalLeaderboard);
+
+    // Unsubscribe scoring service from this session
+    try {
+      await scoringService.unsubscribeFromSession(data.sessionId);
+      console.log('[Controller Handler] Scoring service unsubscribed from session');
+    } catch (error) {
+      console.error('[Controller Handler] Error unsubscribing scoring service:', error);
+      // Continue - cleanup can happen later
+    }
 
     // Log end action in audit logs
     const auditLogsCollection = db.collection('auditLogs');
@@ -1041,26 +1158,145 @@ async function handleVoidQuestion(
 
     console.log('[Controller Handler] Logged void action in audit logs');
 
-    // Send success response to controller
+    // Check if the voided question is the current active question
+    // Requirements: 6.3 - If voided question was current active, trigger next question flow
+    const redisState = await redisDataStructuresService.getSessionState(data.sessionId);
+    const isCurrentActiveQuestion = redisState?.currentQuestionId === data.questionId && 
+                                    redisState?.state === 'ACTIVE_QUESTION';
+
+    // Send success response to controller with additional info about whether it was current question
+    // Requirements: 6.4 - Controller Panel shall show confirmation that participants have been notified
     socket.emit('void_question_ack', {
       success: true,
       sessionId: data.sessionId,
       questionId: data.questionId,
       participantsAffected: pointsToSubtract.size,
-      message: `Question voided successfully. ${pointsToSubtract.size} participant(s) affected.`,
+      wasCurrentQuestion: isCurrentActiveQuestion,
+      message: `Question voided successfully. ${pointsToSubtract.size} participant(s) affected.${isCurrentActiveQuestion ? ' Participants will be transitioned to the next question.' : ''}`,
     });
 
     // Broadcast void notification to all clients
+    // Requirements: 6.1 - Broadcast question_voided event to all participants
     await pubSubService.broadcastToSession(data.sessionId, 'question_voided', {
       questionId: data.questionId,
       reason: data.reason,
       timestamp: new Date().toISOString(),
     });
 
+    // Requirements: 6.3 - If voided question was current active, trigger next question flow
+    if (isCurrentActiveQuestion) {
+      console.log('[Controller Handler] Voided question is current active - triggering next question flow');
+
+      // Stop the active timer
+      const timer = quizTimerManager.getTimer(data.sessionId, data.questionId);
+      if (timer) {
+        timer.stop();
+        console.log('[Controller Handler] Stopped active timer for voided question');
+      }
+
+      // Get the current question index and total questions
+      const currentQuestionIndex = redisState?.currentQuestionIndex ?? session.currentQuestionIndex;
+      const nextQuestionIndex = currentQuestionIndex + 1;
+
+      // Check if there are more questions
+      if (nextQuestionIndex >= quiz.questions.length) {
+        // No more questions - transition to ENDED state
+        console.log('[Controller Handler] No more questions after voided question, ending quiz');
+
+        // Update Redis state
+        await redisDataStructuresService.updateSessionState(data.sessionId, {
+          state: 'ENDED',
+          currentQuestionIndex: currentQuestionIndex,
+        });
+
+        // Update MongoDB
+        await sessionsCollection.updateOne(
+          { sessionId: data.sessionId },
+          {
+            $set: {
+              state: 'ENDED',
+              endedAt: new Date(),
+            },
+          }
+        );
+
+        // Get final leaderboard
+        const participantsWithScores = await Promise.all(
+          participants.map(async (p) => {
+            const participantSession = await redisDataStructuresService.getParticipantSession(p.participantId);
+            const totalScore = participantSession?.totalScore ?? p.totalScore ?? 0;
+            const totalTimeMs = participantSession?.totalTimeMs ?? p.totalTimeMs ?? 0;
+            
+            return {
+              ...p,
+              totalScore,
+              totalTimeMs,
+            };
+          })
+        );
+
+        participantsWithScores.sort((a, b) => {
+          if (b.totalScore !== a.totalScore) {
+            return b.totalScore - a.totalScore;
+          }
+          return a.totalTimeMs - b.totalTimeMs;
+        });
+
+        const finalLeaderboard = participantsWithScores.map((p, index) => ({
+          rank: index + 1,
+          participantId: p.participantId,
+          nickname: p.nickname,
+          totalScore: p.totalScore,
+          totalTimeMs: p.totalTimeMs,
+        }));
+
+        // Broadcast quiz_ended event
+        await broadcastService.broadcastQuizEnded(data.sessionId, finalLeaderboard);
+
+        console.log('[Controller Handler] Quiz ended after voiding last question');
+      } else {
+        // There are more questions - advance to next question
+        const nextQuestion = quiz.questions[nextQuestionIndex];
+
+        // Transition session to ACTIVE_QUESTION state with next question
+        await redisDataStructuresService.updateSessionState(data.sessionId, {
+          state: 'ACTIVE_QUESTION',
+          currentQuestionIndex: nextQuestionIndex,
+          currentQuestionId: nextQuestion.questionId,
+          currentQuestionStartTime: Date.now(),
+        });
+
+        // Update MongoDB
+        await sessionsCollection.updateOne(
+          { sessionId: data.sessionId },
+          {
+            $set: {
+              state: 'ACTIVE_QUESTION',
+              currentQuestionIndex: nextQuestionIndex,
+              currentQuestionStartTime: new Date(),
+            },
+          }
+        );
+
+        // Broadcast question_started event (this also starts the timer)
+        await broadcastService.broadcastQuestionStarted(
+          data.sessionId,
+          nextQuestionIndex,
+          nextQuestion.questionId
+        );
+
+        console.log('[Controller Handler] Advanced to next question after voiding:', {
+          nextQuestionIndex,
+          nextQuestionId: nextQuestion.questionId,
+        });
+      }
+    }
+
     console.log('[Controller Handler] Successfully voided question:', {
       sessionId: data.sessionId,
       questionId: data.questionId,
       participantsAffected: pointsToSubtract.size,
+      wasCurrentQuestion: isCurrentActiveQuestion,
     });
   } catch (error) {
     console.error('[Controller Handler] Error handling void_question:', error);
@@ -1068,6 +1304,296 @@ async function handleVoidQuestion(
     socket.emit('error', {
       event: 'void_question',
       error: 'Failed to void question',
+    });
+  }
+}
+
+/**
+ * Handle skip_question event from controller
+ * 
+ * Skips the current question immediately:
+ * 1. Verify session is in ACTIVE_QUESTION state
+ * 2. Stop the active timer immediately
+ * 3. Broadcast question_skipped event to all clients
+ * 4. Transition to REVEAL state (or next question if exam mode)
+ * 
+ * Requirements: 5.1, 5.3, 5.4
+ * 
+ * @param socket - Socket.IO socket instance
+ * @param data - Event data containing sessionId and optional reason
+ */
+async function handleSkipQuestion(
+  socket: Socket,
+  data: { sessionId: string; reason?: string }
+): Promise<void> {
+  const socketData = socket.data as SocketData;
+  const { sessionId: authenticatedSessionId } = socketData;
+
+  try {
+    console.log('[Controller Handler] Handling skip_question event:', {
+      socketId: socket.id,
+      sessionId: data.sessionId,
+      reason: data.reason,
+    });
+
+    // Verify sessionId matches authenticated session
+    if (data.sessionId !== authenticatedSessionId) {
+      socket.emit('error', {
+        event: 'skip_question',
+        error: 'Session ID mismatch',
+      });
+      return;
+    }
+
+    // Get session state from Redis
+    const redisState = await redisDataStructuresService.getSessionState(data.sessionId);
+
+    if (!redisState) {
+      socket.emit('error', {
+        event: 'skip_question',
+        error: 'Session state not found',
+      });
+      return;
+    }
+
+    // Verify session is in ACTIVE_QUESTION state
+    if (redisState.state !== 'ACTIVE_QUESTION') {
+      socket.emit('error', {
+        event: 'skip_question',
+        error: `Cannot skip question in ${redisState.state} state. Must be in ACTIVE_QUESTION state.`,
+      });
+      return;
+    }
+
+    // Get the current question ID and index
+    const currentQuestionId = redisState.currentQuestionId;
+    const currentQuestionIndex = redisState.currentQuestionIndex ?? 0;
+
+    if (!currentQuestionId) {
+      socket.emit('error', {
+        event: 'skip_question',
+        error: 'No active question found',
+      });
+      return;
+    }
+
+    console.log('[Controller Handler] Skipping question:', {
+      sessionId: data.sessionId,
+      questionId: currentQuestionId,
+      questionIndex: currentQuestionIndex,
+    });
+
+    // Step 1: Stop the active timer immediately (Requirements: 5.1)
+    const timer = quizTimerManager.getTimer(data.sessionId, currentQuestionId);
+    if (timer) {
+      timer.stop();
+      console.log('[Controller Handler] Stopped active timer for skipped question');
+    }
+
+    // Get session from MongoDB to check exam mode settings
+    const db = mongodbService.getDb();
+    const sessionsCollection = db.collection<Session>('sessions');
+    const session = await sessionsCollection.findOne({ sessionId: data.sessionId });
+
+    // Check if exam mode with skipRevealPhase is enabled
+    // Requirements: 4.2, 4.4 - Skip REVEAL state in exam mode
+    const isExamModeSkipReveal = session?.examMode?.skipRevealPhase === true;
+
+    // Step 2: Broadcast question_skipped event to all clients (Requirements: 5.3, 5.4)
+    const questionSkippedEvent = {
+      questionId: currentQuestionId,
+      questionIndex: currentQuestionIndex,
+      reason: data.reason || 'Question skipped by controller',
+      timestamp: Date.now(),
+      // Include exam mode flag so clients know whether to expect REVEAL or next question
+      examModeSkipReveal: isExamModeSkipReveal,
+    };
+
+    await pubSubService.broadcastToSession(data.sessionId, 'question_skipped', questionSkippedEvent);
+
+    console.log('[Controller Handler] Broadcasted question_skipped event to all clients');
+
+    // Log skip action in audit logs
+    const auditLogsCollection = db.collection('auditLogs');
+    await auditLogsCollection.insertOne({
+      timestamp: new Date(),
+      eventType: 'QUESTION_SKIPPED' as any,
+      sessionId: data.sessionId,
+      details: {
+        questionId: currentQuestionId,
+        questionIndex: currentQuestionIndex,
+        reason: data.reason || 'Question skipped by controller',
+        skippedAt: new Date().toISOString(),
+        examModeSkipReveal: isExamModeSkipReveal,
+      },
+    });
+
+    console.log('[Controller Handler] Logged skip action in audit logs');
+
+    // Step 3: Handle state transition based on exam mode
+    if (isExamModeSkipReveal) {
+      // Exam mode: Skip REVEAL and go directly to next question
+      // Requirements: 4.2, 4.4
+      console.log('[Controller Handler] Exam mode enabled - skipping REVEAL state');
+
+      // Get quiz to find questions
+      const quizzesCollection = db.collection<Quiz>('quizzes');
+      const quiz = session ? await quizzesCollection.findOne({ _id: session.quizId }) : null;
+
+      if (!quiz) {
+        socket.emit('error', {
+          event: 'skip_question',
+          error: 'Quiz not found',
+        });
+        return;
+      }
+
+      const nextQuestionIndex = currentQuestionIndex + 1;
+
+      // Check if there are more questions
+      if (nextQuestionIndex >= quiz.questions.length) {
+        // No more questions - transition to ENDED state
+        console.log('[Controller Handler] No more questions after skip, ending quiz');
+
+        await redisDataStructuresService.updateSessionState(data.sessionId, {
+          state: 'ENDED',
+          currentQuestionIndex: currentQuestionIndex,
+          timerEndTime: undefined,
+        });
+
+        await sessionsCollection.updateOne(
+          { sessionId: data.sessionId },
+          { $set: { state: 'ENDED', endedAt: new Date() } }
+        );
+
+        // Get final leaderboard
+        const participantsCollection = db.collection<Participant>('participants');
+        const participants = await participantsCollection
+          .find({ sessionId: data.sessionId, isActive: true })
+          .toArray();
+
+        const participantsWithScores = await Promise.all(
+          participants.map(async (p) => {
+            const participantSession = await redisDataStructuresService.getParticipantSession(p.participantId);
+            return {
+              ...p,
+              totalScore: participantSession?.totalScore ?? p.totalScore ?? 0,
+              totalTimeMs: participantSession?.totalTimeMs ?? p.totalTimeMs ?? 0,
+            };
+          })
+        );
+
+        participantsWithScores.sort((a, b) => {
+          if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
+          return a.totalTimeMs - b.totalTimeMs;
+        });
+
+        const finalLeaderboard = participantsWithScores.map((p, index) => ({
+          rank: index + 1,
+          participantId: p.participantId,
+          nickname: p.nickname,
+          totalScore: p.totalScore,
+          totalTimeMs: p.totalTimeMs,
+        }));
+
+        await broadcastService.broadcastQuizEnded(data.sessionId, finalLeaderboard);
+
+        socket.emit('skip_question_ack', {
+          success: true,
+          sessionId: data.sessionId,
+          questionId: currentQuestionId,
+          questionIndex: currentQuestionIndex,
+          message: 'Question skipped - Quiz ended (no more questions)',
+          quizEnded: true,
+          finalLeaderboard,
+        });
+      } else {
+        // More questions - go directly to next question
+        const nextQuestion = quiz.questions[nextQuestionIndex];
+
+        await redisDataStructuresService.updateSessionState(data.sessionId, {
+          state: 'ACTIVE_QUESTION',
+          currentQuestionIndex: nextQuestionIndex,
+          currentQuestionId: nextQuestion.questionId,
+          currentQuestionStartTime: Date.now(),
+          timerEndTime: undefined,
+        });
+
+        await sessionsCollection.updateOne(
+          { sessionId: data.sessionId },
+          {
+            $set: {
+              state: 'ACTIVE_QUESTION',
+              currentQuestionIndex: nextQuestionIndex,
+              currentQuestionStartTime: new Date(),
+            },
+          }
+        );
+
+        console.log('[Controller Handler] Exam mode: Transitioning directly to next question:', {
+          sessionId: data.sessionId,
+          nextQuestionIndex,
+          nextQuestionId: nextQuestion.questionId,
+        });
+
+        // Broadcast question_started event (this also starts the timer)
+        await broadcastService.broadcastQuestionStarted(
+          data.sessionId,
+          nextQuestionIndex,
+          nextQuestion.questionId
+        );
+
+        socket.emit('skip_question_ack', {
+          success: true,
+          sessionId: data.sessionId,
+          questionId: currentQuestionId,
+          questionIndex: currentQuestionIndex,
+          message: 'Question skipped - Advanced to next question (exam mode)',
+          quizEnded: false,
+          nextQuestionIndex,
+        });
+      }
+
+      console.log('[Controller Handler] Successfully skipped question (exam mode):', {
+        sessionId: data.sessionId,
+        questionId: currentQuestionId,
+        questionIndex: currentQuestionIndex,
+      });
+    } else {
+      // Normal mode: Transition to REVEAL state
+      await redisDataStructuresService.updateSessionState(data.sessionId, {
+        state: 'REVEAL',
+        timerEndTime: undefined, // Clear timer end time
+      });
+
+      await sessionsCollection.updateOne(
+        { sessionId: data.sessionId },
+        { $set: { state: 'REVEAL' } }
+      );
+
+      console.log('[Controller Handler] Session state transitioned to REVEAL');
+
+      // Send success response to controller
+      socket.emit('skip_question_ack', {
+        success: true,
+        sessionId: data.sessionId,
+        questionId: currentQuestionId,
+        questionIndex: currentQuestionIndex,
+        message: 'Question skipped successfully',
+      });
+
+      console.log('[Controller Handler] Successfully skipped question:', {
+        sessionId: data.sessionId,
+        questionId: currentQuestionId,
+        questionIndex: currentQuestionIndex,
+      });
+    }
+  } catch (error) {
+    console.error('[Controller Handler] Error handling skip_question:', error);
+
+    socket.emit('error', {
+      event: 'skip_question',
+      error: 'Failed to skip question',
     });
   }
 }
@@ -2246,6 +2772,11 @@ function setupControllerEventHandlers(socket: Socket): void {
   // Task 24.3: Handle void_question event
   socket.on('void_question', async (data: { sessionId: string; questionId: string; reason: string }) => {
     await handleVoidQuestion(socket, data);
+  });
+
+  // Task 3.1: Handle skip_question event (Requirements: 5.1, 5.3, 5.4)
+  socket.on('skip_question', async (data: { sessionId: string; reason?: string }) => {
+    await handleSkipQuestion(socket, data);
   });
 
   // Task 24.4: Handle timer control events

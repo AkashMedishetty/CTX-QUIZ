@@ -19,9 +19,11 @@ export { LeaderboardCard } from './leaderboard-card';
 export { LeaderboardRow } from './leaderboard-row';
 export { BigScreenPreviewCard } from './bigscreen-preview-card';
 export { SystemMetricsCard } from './system-metrics-card';
+export { FocusMonitoringCard } from './focus-monitoring-card';
+export { TournamentBracketCard } from './tournament-bracket-card';
 
 // Types
-export type { QuestionWithNotes } from './quiz-control-card';
+export type { QuestionWithNotes, ExamModeConfig, VoidConfirmation } from './quiz-control-card';
 export type { TimerState } from './timer-control-card';
 export type { Participant } from './participant-list-card';
 export type { ParticipantStatus, ParticipantRowProps } from './participant-row';
@@ -31,3 +33,5 @@ export type { LeaderboardCardProps } from './leaderboard-card';
 export type { LeaderboardRowProps } from './leaderboard-row';
 export type { BigScreenPreviewCardProps } from './bigscreen-preview-card';
 export type { SystemMetricsCardProps } from './system-metrics-card';
+export type { FocusMonitoringCardProps, ParticipantFocusData } from './focus-monitoring-card';
+export type { TournamentBracketCardProps } from './tournament-bracket-card';

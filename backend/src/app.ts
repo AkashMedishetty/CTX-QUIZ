@@ -13,6 +13,7 @@ import quizRoutes from './routes/quiz.routes';
 import uploadRoutes from './routes/upload.routes';
 import sessionRoutes from './routes/session.routes';
 import auditLogRoutes from './routes/audit-log.routes';
+import tournamentRoutes from './routes/tournament.routes';
 
 /**
  * Create and configure Express application
@@ -59,6 +60,9 @@ export function createApp(): Application {
 
   // Audit log query endpoints
   app.use('/api/audit-logs', auditLogRoutes);
+
+  // Tournament management endpoints
+  app.use('/api/tournaments', tournamentRoutes);
 
   // ===== 404 Handler =====
   // Handle requests to non-existent routes

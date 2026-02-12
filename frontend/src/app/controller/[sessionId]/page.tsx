@@ -18,7 +18,7 @@ import { useParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useControllerSocket } from '@/hooks/useControllerSocket';
 import { ThemeToggle } from '@/components/ui';
-import { ConnectionStatusIndicator, SessionInfoCard, QuizControlCard, TimerControlCard, ParticipantListCard, QuestionWithNotes, AnswerCountCard, LeaderboardCard, BigScreenPreviewCard, SystemMetricsCard } from './components';
+import { ConnectionStatusIndicator, SessionInfoCard, QuizControlCard, TimerControlCard, ParticipantListCard, QuestionWithNotes, AnswerCountCard, LeaderboardCard, BigScreenPreviewCard, SystemMetricsCard, VoidConfirmation, FocusMonitoringCard, TournamentBracketCard } from './components';
 import type { TimerState, Participant } from './components';
 
 /**
@@ -31,6 +31,8 @@ export default function ControllerPanelPage() {
   const [isInitialized, setIsInitialized] = useState(false);
   // Quiz questions for preview - would be populated from API
   const [quizQuestions] = useState<QuestionWithNotes[]>([]);
+  // Void confirmation state - Requirements: 6.4
+  const [voidConfirmation, setVoidConfirmation] = useState<VoidConfirmation | null>(null);
 
   const {
     connectionState,
@@ -42,6 +44,7 @@ export default function ControllerPanelPage() {
     nextQuestion,
     endQuiz,
     voidQuestion,
+    skipQuestion,
     pauseTimer,
     resumeTimer,
     resetTimer,
@@ -65,6 +68,16 @@ export default function ControllerPanelPage() {
     },
     onQuizEnded: (leaderboard) => {
       console.info('[Controller] Quiz ended, final leaderboard:', leaderboard.length, 'entries');
+    },
+    // Requirements: 6.4 - Show confirmation that participants have been notified
+    onQuestionVoided: (data) => {
+      console.info('[Controller] Question voided:', data);
+      setVoidConfirmation({
+        questionId: data.questionId,
+        participantsAffected: data.participantsAffected,
+        message: data.message,
+        timestamp: Date.now(),
+      });
     },
   });
 
@@ -103,6 +116,16 @@ export default function ControllerPanelPage() {
   const handleVoidQuestion = useCallback((questionId: string, reason: string) => {
     voidQuestion(questionId, reason);
   }, [voidQuestion]);
+
+  // Handle skip question - Requirements: 5.2
+  const handleSkipQuestion = useCallback((reason?: string) => {
+    skipQuestion(reason);
+  }, [skipQuestion]);
+
+  // Handle clear void confirmation - Requirements: 6.4
+  const handleClearVoidConfirmation = useCallback(() => {
+    setVoidConfirmation(null);
+  }, []);
 
   // Handle end quiz
   const handleEndQuiz = useCallback(() => {
@@ -367,10 +390,15 @@ export default function ControllerPanelPage() {
                     currentQuestionIndex={sessionState?.currentQuestionIndex || 0}
                     totalQuestions={sessionState?.totalQuestions || 0}
                     questions={quizQuestions}
+                    examMode={sessionState?.examMode ?? null}
+                    voidConfirmation={voidConfirmation}
                     onStartQuiz={handleStartQuiz}
                     onNextQuestion={handleNextQuestion}
+                    onSkipReveal={handleNextQuestion}
+                    onSkipQuestion={handleSkipQuestion}
                     onVoidQuestion={handleVoidQuestion}
                     onEndQuiz={handleEndQuiz}
+                    onClearVoidConfirmation={handleClearVoidConfirmation}
                     isDisabled={connectionState !== 'connected'}
                   />
                 </div>
@@ -391,7 +419,7 @@ export default function ControllerPanelPage() {
               </div>
 
               {/* Additional panels grid */}
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
                 {/* Answer Count Card */}
                 <AnswerCountCard
                   answerCount={sessionState?.answerCount || null}
@@ -403,6 +431,17 @@ export default function ControllerPanelPage() {
                 <SystemMetricsCard
                   systemMetrics={sessionState?.systemMetrics || null}
                   isConnected={connectionState === 'connected'}
+                />
+
+                {/* Focus Monitoring Card - Requirements: 9.4, 9.5 */}
+                <FocusMonitoringCard
+                  participants={sessionState?.participants?.map((p) => ({
+                    participantId: p.participantId,
+                    nickname: p.nickname,
+                    focusData: p.focusData,
+                  })) || []}
+                  isEnabled={true}
+                  isQuizActive={sessionState?.state === 'ACTIVE_QUESTION' || sessionState?.state === 'REVEAL'}
                 />
 
                 {/* Participants List */}
@@ -446,6 +485,14 @@ export default function ControllerPanelPage() {
                   />
                 </div>
               </div>
+
+              {/* Tournament Bracket - Only shown for tournament sessions */}
+              {sessionState?.tournamentId && (
+                <TournamentBracketCard
+                  tournamentId={sessionState.tournamentId}
+                  sessionId={sessionId}
+                />
+              )}
             </motion.div>
           )}
         </AnimatePresence>

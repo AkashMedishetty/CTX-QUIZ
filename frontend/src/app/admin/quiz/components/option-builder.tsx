@@ -15,7 +15,8 @@
 import * as React from 'react';
 import { AnimatePresence, Reorder } from 'framer-motion';
 import { Button, Input } from '@/components/ui';
-import { cn } from '@/lib/utils';
+import { cn, getImageUrl } from '@/lib/utils';
+import { uploadFile } from '@/lib/api-client';
 
 /**
  * Option data interface
@@ -36,7 +37,7 @@ export interface OptionBuilderProps {
   /** Callback when options change */
   onChange: (options: OptionData[]) => void;
   /** Question type - affects correct answer selection */
-  questionType: 'MULTIPLE_CHOICE' | 'MULTI_SELECT' | 'TRUE_FALSE';
+  questionType: 'MULTIPLE_CHOICE' | 'MULTI_SELECT' | 'TRUE_FALSE' | 'SCALE_1_10' | 'NUMBER_INPUT' | 'OPEN_ENDED';
   /** Error message */
   error?: string;
   /** Disabled state */
@@ -160,18 +161,15 @@ function OptionItem({
 
     setIsUploading(true);
     try {
-      // Create FormData and upload
-      const formData = new FormData();
-      formData.append('image', file);
+      // Use the api-client uploadFile function which properly routes to backend
+      const response = await uploadFile<{ success: boolean; imageUrl: string }>(
+        '/upload/image',
+        file,
+        'image'
+      );
 
-      const response = await fetch('/api/upload/image', {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        onUpdate(option.id, { optionImageUrl: data.imageUrl });
+      if (response.success && response.imageUrl) {
+        onUpdate(option.id, { optionImageUrl: response.imageUrl });
       }
     } catch (error) {
       console.error('Image upload failed:', error);
@@ -240,7 +238,7 @@ function OptionItem({
         {option.optionImageUrl ? (
           <div className="relative inline-block">
             <img
-              src={option.optionImageUrl}
+              src={getImageUrl(option.optionImageUrl)}
               alt={`Option ${label} image`}
               className="max-h-24 rounded-md object-cover"
             />
@@ -384,8 +382,8 @@ export function OptionBuilder({
           isCorrect: opt.id === id ? !opt.isCorrect : false,
         }))
       );
-    } else {
-      // Multi-select - toggle individual option
+    } else if (questionType === 'MULTI_SELECT' || questionType === 'SCALE_1_10') {
+      // Multi-select and SCALE_1_10 - toggle individual option
       onChange(
         options.map((opt) =>
           opt.id === id ? { ...opt, isCorrect: !opt.isCorrect } : opt
@@ -400,10 +398,10 @@ export function OptionBuilder({
   };
 
   // Minimum options based on question type
-  const minOptions = questionType === 'TRUE_FALSE' ? 2 : 2;
-  const maxOptions = questionType === 'TRUE_FALSE' ? 2 : 10;
-  const canAddMore = options.length < maxOptions;
-  const canRemove = options.length > minOptions;
+  const minOptions = questionType === 'TRUE_FALSE' ? 2 : questionType === 'SCALE_1_10' ? 10 : 2;
+  const maxOptions = questionType === 'TRUE_FALSE' ? 2 : questionType === 'SCALE_1_10' ? 10 : 10;
+  const canAddMore = options.length < maxOptions && questionType !== 'SCALE_1_10';
+  const canRemove = options.length > minOptions && questionType !== 'SCALE_1_10';
 
   // Count correct answers
   const correctCount = options.filter((opt) => opt.isCorrect).length;
@@ -419,6 +417,8 @@ export function OptionBuilder({
           <p className="text-body-sm text-[var(--text-muted)]">
             {questionType === 'MULTI_SELECT'
               ? 'Select all correct answers'
+              : questionType === 'SCALE_1_10'
+              ? 'Select the correct scale value(s)'
               : 'Select the correct answer'}
             {' • '}
             {correctCount} correct

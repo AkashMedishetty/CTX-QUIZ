@@ -1,6 +1,11 @@
 // Configuration module
 // Centralizes all environment variable access and configuration
 
+import dotenv from 'dotenv';
+
+// Load environment variables at module initialization
+dotenv.config();
+
 /**
  * Validates and returns the JWT secret
  * In production, requires a strong secret from environment variable

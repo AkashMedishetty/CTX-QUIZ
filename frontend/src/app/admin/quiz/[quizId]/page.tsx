@@ -30,6 +30,8 @@ import {
 } from '@/components/ui/modal';
 import { QuizForm, type QuizFormData } from '../components/quiz-form';
 import { QuestionBuilder, type QuestionFormData } from '../components/question-builder';
+import { CSVImporter } from '../components/csv-importer';
+import { downloadTemplate } from '@/lib/csv-parser';
 import { cn } from '@/lib/utils';
 
 /**
@@ -77,6 +79,13 @@ interface Quiz {
   ffiSettings?: {
     winnersPerQuestion: number;
   };
+  examSettings?: {
+    negativeMarkingEnabled: boolean;
+    negativeMarkingPercentage: number;
+    focusMonitoringEnabled: boolean;
+    skipRevealPhase?: boolean;
+    autoAdvance?: boolean;
+  };
   questions: Question[];
   createdAt: string;
   updatedAt: string;
@@ -100,6 +109,13 @@ interface UpdateQuizRequest {
   };
   ffiSettings?: {
     winnersPerQuestion: number;
+  };
+  examSettings?: {
+    negativeMarkingEnabled: boolean;
+    negativeMarkingPercentage: number;
+    focusMonitoringEnabled: boolean;
+    skipRevealPhase?: boolean;
+    autoAdvance?: boolean;
   };
 }
 
@@ -219,6 +235,26 @@ function EyeIcon({ className }: { className?: string }) {
     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
       <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
       <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+function UploadIcon({ className }: { className?: string }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="17 8 12 3 7 8" />
+      <line x1="12" y1="3" x2="12" y2="15" />
+    </svg>
+  );
+}
+
+function DownloadIcon({ className }: { className?: string }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" y1="15" x2="12" y2="3" />
     </svg>
   );
 }
@@ -577,6 +613,13 @@ function quizToFormData(quiz: Quiz): QuizFormData {
     },
     eliminationPercentage: quiz.eliminationSettings?.eliminationPercentage,
     ffiWinnerCount: quiz.ffiSettings?.winnersPerQuestion,
+    examSettings: quiz.examSettings ? {
+      negativeMarkingEnabled: quiz.examSettings.negativeMarkingEnabled ?? false,
+      negativeMarkingPercentage: quiz.examSettings.negativeMarkingPercentage ?? 25,
+      focusMonitoringEnabled: quiz.examSettings.focusMonitoringEnabled ?? false,
+      skipRevealPhase: quiz.examSettings.skipRevealPhase ?? false,
+      autoAdvance: quiz.examSettings.autoAdvance ?? false,
+    } : undefined,
   };
 }
 
@@ -596,6 +639,7 @@ export default function QuizEditPage() {
   const [toast, setToast] = React.useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [showMetadataModal, setShowMetadataModal] = React.useState(false);
   const [showQuestionModal, setShowQuestionModal] = React.useState(false);
+  const [showCSVImporter, setShowCSVImporter] = React.useState(false);
   const [editingQuestion, setEditingQuestion] = React.useState<Question | null>(null);
   const [deleteConfirm, setDeleteConfirm] = React.useState<{ questionId: string; questionText: string } | null>(null);
 
@@ -697,6 +741,10 @@ export default function QuizEditPage() {
       };
     }
 
+    if (formData.examSettings) {
+      requestData.examSettings = formData.examSettings;
+    }
+
     await updateQuizMutation.mutateAsync(requestData);
   };
 
@@ -756,6 +804,25 @@ export default function QuizEditPage() {
   // Handle back navigation
   const handleBack = () => {
     router.push('/admin');
+  };
+
+  // Handle CSV import
+  const handleCSVImport = async (importedQuestions: QuestionFormData[]) => {
+    // Add each question sequentially
+    for (const questionData of importedQuestions) {
+      const requestData = formDataToRequest(questionData);
+      try {
+        await addQuestion(quizId, requestData);
+      } catch (error) {
+        console.error('Failed to import question:', error);
+      }
+    }
+    // Refresh the quiz data
+    queryClient.invalidateQueries({ queryKey: ['quiz', quizId] });
+    setToast({ 
+      message: `Successfully imported ${importedQuestions.length} question${importedQuestions.length !== 1 ? 's' : ''}!`, 
+      type: 'success' 
+    });
   };
 
   // Invalid quizId state
@@ -890,9 +957,26 @@ export default function QuizEditPage() {
               Drag to reorder • Click to edit
             </p>
           </div>
-          <Button variant="primary" onClick={handleAddQuestion} leftIcon={<PlusIcon />}>
-            Add Question
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button 
+              variant="ghost" 
+              onClick={() => downloadTemplate()}
+              leftIcon={<DownloadIcon />}
+              title="Download CSV template"
+            >
+              Template
+            </Button>
+            <Button 
+              variant="secondary" 
+              onClick={() => setShowCSVImporter(true)}
+              leftIcon={<UploadIcon />}
+            >
+              Import CSV
+            </Button>
+            <Button variant="primary" onClick={handleAddQuestion} leftIcon={<PlusIcon />}>
+              Add Question
+            </Button>
+          </div>
         </div>
 
         {questions.length === 0 ? (
@@ -998,6 +1082,14 @@ export default function QuizEditPage() {
         title="Delete Question"
         description={`Are you sure you want to delete "${deleteConfirm?.questionText}"? This action cannot be undone.`}
         isLoading={deleteQuestionMutation.isPending}
+      />
+
+      {/* CSV Importer Modal */}
+      <CSVImporter
+        isOpen={showCSVImporter}
+        onClose={() => setShowCSVImporter(false)}
+        onImport={handleCSVImport}
+        existingQuestionCount={questions.length}
       />
 
       {/* Toast Notification */}

@@ -58,10 +58,24 @@ export async function handleBigScreenConnection(socket: Socket): Promise<void> {
       sessionState: sessionState.state,
     });
 
-    // If session is in LOBBY state, broadcast lobby_state
+    // If session is in LOBBY state, emit lobby_state directly to this socket
+    // CRITICAL FIX: Direct emit avoids the pub/sub race condition where the
+    // Redis subscription may not be active yet when broadcastLobbyState publishes
     if (sessionState.state === 'LOBBY') {
-      const { broadcastService } = await import('../services/broadcast.service');
-      await broadcastService.broadcastLobbyState(sessionId);
+      try {
+        const lobbyPayload = await buildLobbyStatePayload(sessionId);
+        if (lobbyPayload) {
+          socket.emit('lobby_state', lobbyPayload);
+          console.log('[BigScreen Handler] Emitted lobby_state directly to socket:', {
+            socketId: socket.id,
+            sessionId,
+            participantCount: lobbyPayload.participantCount,
+          });
+        }
+      } catch (lobbyError) {
+        // Requirement 1.3: Log error but don't disconnect the socket
+        console.error('[BigScreen Handler] Error emitting direct lobby_state (non-fatal):', lobbyError);
+      }
     }
 
   } catch (error) {
@@ -243,6 +257,58 @@ async function getCurrentSessionState(sessionId: string): Promise<{
     state: session.state,
     currentQuestionIndex: session.currentQuestionIndex,
     participantCount: session.participantCount,
+  };
+}
+
+/**
+ * Build lobby state payload for direct emission to big screen socket
+ * 
+ * Fetches participants from MongoDB and count from Redis to build the same
+ * payload shape that broadcastService.broadcastLobbyState produces.
+ * 
+ * @param sessionId - Session ID
+ * @returns Lobby state payload or null if session not found
+ */
+async function buildLobbyStatePayload(sessionId: string): Promise<{
+  sessionId: string;
+  joinCode: string;
+  participantCount: number;
+  participants: Array<{ participantId: string; nickname: string }>;
+  allowLateJoiners: boolean;
+} | null> {
+  const db = mongodbService.getDb();
+  const sessionsCollection = db.collection<Session>('sessions');
+  const session = await sessionsCollection.findOne({ sessionId });
+
+  if (!session) {
+    return null;
+  }
+
+  // Get active participants
+  const participantsCollection = db.collection('participants');
+  const participants = await participantsCollection
+    .find({ sessionId, isActive: true })
+    .sort({ joinedAt: 1 })
+    .toArray();
+
+  const participantList = participants.map((p: any) => ({
+    participantId: p.participantId,
+    nickname: p.nickname,
+  }));
+
+  // Get participant count from Redis (most up-to-date)
+  const redis = redisService.getClient();
+  const sessionState = await redis.hgetall(`session:${sessionId}:state`);
+  const participantCount = sessionState?.participantCount
+    ? parseInt(sessionState.participantCount)
+    : session.participantCount;
+
+  return {
+    sessionId,
+    joinCode: session.joinCode,
+    participantCount,
+    participants: participantList,
+    allowLateJoiners: session.allowLateJoiners ?? true,
   };
 }
 

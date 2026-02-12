@@ -41,6 +41,13 @@ export interface LobbyScreenProps {
   participants: LobbyParticipant[];
   /** Whether the socket is connected */
   isConnected: boolean;
+  /** Tournament info (optional) */
+  tournamentInfo?: {
+    tournamentId: string;
+    title: string;
+    currentRound: number;
+    totalRounds: number;
+  } | null;
 }
 
 /**
@@ -67,6 +74,7 @@ export function LobbyScreen({
   participantCount,
   participants,
   isConnected,
+  tournamentInfo,
 }: LobbyScreenProps) {
   // Generate join URL
   const joinUrl = `${JOIN_URL_BASE}/${joinCode}`;
@@ -95,14 +103,40 @@ export function LobbyScreen({
             </div>
             <div>
               <h1 className="text-2xl md:text-3xl lg:text-display font-bold text-[var(--text-primary)] font-display">
-                CTX Quiz
+                {tournamentInfo ? tournamentInfo.title : 'CTX Quiz'}
               </h1>
               <p className="text-sm md:text-base lg:text-body-lg text-[var(--text-secondary)]">
-                Live Quiz Platform
+                {tournamentInfo 
+                  ? `Round ${tournamentInfo.currentRound} of ${tournamentInfo.totalRounds}`
+                  : 'Live Quiz Platform'}
               </p>
             </div>
           </div>
         </motion.div>
+        
+        {/* Tournament Badge */}
+        {tournamentInfo && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.9 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ duration: 0.5, delay: 0.3 }}
+            className="flex justify-center mt-4"
+          >
+            <div className="neu-raised-sm rounded-full px-6 py-2 flex items-center gap-3">
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-primary">
+                <path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6" />
+                <path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18" />
+                <path d="M4 22h16" />
+                <path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22" />
+                <path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22" />
+                <path d="M18 2H6v7a6 6 0 0 0 12 0V2Z" />
+              </svg>
+              <span className="text-lg md:text-xl font-semibold text-primary">
+                Tournament Mode
+              </span>
+            </div>
+          </motion.div>
+        )}
       </header>
 
       {/* Main Content - Responsive padding */}

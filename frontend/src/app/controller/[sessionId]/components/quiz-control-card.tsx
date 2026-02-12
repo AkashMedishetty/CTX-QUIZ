@@ -6,19 +6,48 @@
  * - Question number and total questions
  * - Question type and time limit
  * - Current session state
- * - Control buttons (Start Quiz, Next Question, Void Question, End Quiz)
+ * - Control buttons (Start Quiz, Next Question, Skip Question, Skip Reveal, Void Question, End Quiz)
+ * - Exam mode indicator
+ * - Void confirmation display
  * 
- * Requirements: 2.8, 13.2, 13.3
+ * Requirements: 2.8, 4.1, 4.3, 5.2, 6.4, 13.2, 13.3
  */
 
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { SessionState, QuestionData } from '@/lib/socket-client';
 import { Button } from '@/components/ui/button';
 import { VoidQuestionModal } from './void-question-modal';
 import { NextQuestionPreview } from './next-question-preview';
+import { getImageUrl } from '@/lib/utils';
+
+/**
+ * Exam mode configuration interface
+ * Requirements: 4.1, 4.3
+ */
+export interface ExamModeConfig {
+  /** Skip reveal/analytics phase - go directly to next question */
+  skipRevealPhase: boolean;
+  /** Enable negative marking for wrong answers */
+  negativeMarkingEnabled: boolean;
+  /** Percentage of base points to deduct for wrong answers */
+  negativeMarkingPercentage: number;
+  /** Enable focus monitoring to detect tab switches */
+  focusMonitoringEnabled: boolean;
+}
+
+/**
+ * Void confirmation data for display
+ * Requirements: 6.4
+ */
+export interface VoidConfirmation {
+  questionId: string;
+  participantsAffected: number;
+  message: string;
+  timestamp: number;
+}
 
 /**
  * Extended question data with speaker notes
@@ -42,14 +71,24 @@ interface QuizControlCardProps {
   totalQuestions: number;
   /** All questions for preview */
   questions?: QuestionWithNotes[];
+  /** Exam mode configuration - Requirements: 4.1, 4.3 */
+  examMode?: ExamModeConfig | null;
+  /** Void confirmation data - Requirements: 6.4 */
+  voidConfirmation?: VoidConfirmation | null;
   /** Callback to start the quiz */
   onStartQuiz: () => void;
   /** Callback to advance to next question */
   onNextQuestion: () => void;
+  /** Callback to skip reveal and go directly to next question */
+  onSkipReveal?: () => void;
+  /** Callback to skip the current question - Requirements: 5.2 */
+  onSkipQuestion?: (reason?: string) => void;
   /** Callback to void current question */
   onVoidQuestion: (questionId: string, reason: string) => void;
   /** Callback to end the quiz */
   onEndQuiz: () => void;
+  /** Callback to clear void confirmation */
+  onClearVoidConfirmation?: () => void;
   /** Whether actions are disabled (e.g., during loading) */
   isDisabled?: boolean;
 }
@@ -77,14 +116,31 @@ export function QuizControlCard({
   currentQuestionIndex,
   totalQuestions,
   questions = [],
+  examMode,
+  voidConfirmation,
   onStartQuiz,
   onNextQuestion,
+  onSkipReveal,
+  onSkipQuestion,
   onVoidQuestion,
   onEndQuiz,
+  onClearVoidConfirmation,
   isDisabled = false,
 }: QuizControlCardProps) {
   const [isVoidModalOpen, setIsVoidModalOpen] = useState(false);
   const [isEndQuizConfirmOpen, setIsEndQuizConfirmOpen] = useState(false);
+  const [isSkipConfirmOpen, setIsSkipConfirmOpen] = useState(false);
+
+  // Auto-dismiss void confirmation after 5 seconds
+  useEffect(() => {
+    if (voidConfirmation && onClearVoidConfirmation) {
+      const timer = setTimeout(() => {
+        onClearVoidConfirmation();
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+    return undefined;
+  }, [voidConfirmation, onClearVoidConfirmation]);
 
   // Get next question for preview
   const nextQuestion = questions[currentQuestionIndex + 1] || null;
@@ -98,11 +154,22 @@ export function QuizControlCard({
     }
   };
 
+  // Handle skip question - Requirements: 5.2
+  const handleSkipQuestion = () => {
+    if (onSkipQuestion) {
+      onSkipQuestion('Question skipped by controller');
+      setIsSkipConfirmOpen(false);
+    }
+  };
+
   // Handle end quiz confirmation
   const handleEndQuiz = () => {
     onEndQuiz();
     setIsEndQuizConfirmOpen(false);
   };
+
+  // Check if exam mode is enabled
+  const isExamMode = examMode?.skipRevealPhase === true;
 
   return (
     <motion.div
@@ -141,12 +208,35 @@ export function QuizControlCard({
 
           {/* Question Counter */}
           {sessionState !== 'LOBBY' && sessionState !== 'ENDED' && (
-            <div className="neu-pressed rounded-lg px-4 py-2">
-              <p className="text-caption text-[var(--text-muted)]">Question</p>
-              <p className="text-h3 font-bold text-primary">
-                {currentQuestionIndex + 1}
-                <span className="text-body text-[var(--text-muted)]"> / {totalQuestions}</span>
-              </p>
+            <div className="flex items-center gap-3">
+              {/* Exam Mode Indicator - Requirements: 4.1, 4.3 */}
+              {isExamMode && (
+                <div className="neu-pressed rounded-lg px-3 py-2 bg-warning/5 border border-warning/20">
+                  <div className="flex items-center gap-2">
+                    <svg
+                      className="w-4 h-4 text-warning"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"
+                      />
+                    </svg>
+                    <span className="text-caption font-medium text-warning">Exam Mode</span>
+                  </div>
+                </div>
+              )}
+              <div className="neu-pressed rounded-lg px-4 py-2">
+                <p className="text-caption text-[var(--text-muted)]">Question</p>
+                <p className="text-h3 font-bold text-primary">
+                  {currentQuestionIndex + 1}
+                  <span className="text-body text-[var(--text-muted)]"> / {totalQuestions}</span>
+                </p>
+              </div>
             </div>
           )}
         </div>
@@ -252,7 +342,7 @@ export function QuizControlCard({
                 {currentQuestion.questionImageUrl && (
                   <div className="mt-4">
                     <img
-                      src={currentQuestion.questionImageUrl}
+                      src={getImageUrl(currentQuestion.questionImageUrl)}
                       alt="Question"
                       className="max-w-full h-auto rounded-lg"
                     />
@@ -276,7 +366,7 @@ export function QuizControlCard({
                       </p>
                       {option.optionImageUrl && (
                         <img
-                          src={option.optionImageUrl}
+                          src={getImageUrl(option.optionImageUrl)}
                           alt={`Option ${String.fromCharCode(65 + index)}`}
                           className="mt-2 max-w-full h-auto rounded"
                         />
@@ -344,6 +434,48 @@ export function QuizControlCard({
 
               {/* Control Buttons */}
               <div className="flex flex-wrap items-center gap-3 pt-4 border-t border-[var(--border)]">
+                {/* Skip Question Button - Only in ACTIVE_QUESTION state - Requirements: 5.2 */}
+                {sessionState === 'ACTIVE_QUESTION' && onSkipQuestion && (
+                  <Button
+                    variant="warning"
+                    onClick={() => setIsSkipConfirmOpen(true)}
+                    disabled={isDisabled}
+                    leftIcon={
+                      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M11.933 12.8a1 1 0 000-1.6L6.6 7.2A1 1 0 005 8v8a1 1 0 001.6.8l5.333-4zM19.933 12.8a1 1 0 000-1.6l-5.333-4A1 1 0 0013 8v8a1 1 0 001.6.8l5.333-4z"
+                        />
+                      </svg>
+                    }
+                  >
+                    Skip Question
+                  </Button>
+                )}
+
+                {/* Skip Reveal Button - Only in ACTIVE_QUESTION state when there are more questions */}
+                {sessionState === 'ACTIVE_QUESTION' && hasMoreQuestions && onSkipReveal && (
+                  <Button
+                    variant="secondary"
+                    onClick={onSkipReveal}
+                    disabled={isDisabled}
+                    leftIcon={
+                      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M13 5l7 7-7 7M5 5l7 7-7 7"
+                        />
+                      </svg>
+                    }
+                  >
+                    Skip to Next
+                  </Button>
+                )}
+
                 {/* Next Question Button - Only in REVEAL state */}
                 {sessionState === 'REVEAL' && hasMoreQuestions && (
                   <Button
@@ -478,12 +610,84 @@ export function QuizControlCard({
         </div>
       )}
 
+      {/* Void Confirmation Display - Requirements: 6.4 */}
+      <AnimatePresence>
+        {voidConfirmation && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className="fixed bottom-6 right-6 z-50 max-w-md"
+          >
+            <div className="neu-raised-lg rounded-xl p-4 bg-success/5 border border-success/20">
+              <div className="flex items-start gap-3">
+                <div className="flex-shrink-0 w-10 h-10 rounded-full bg-success/10 flex items-center justify-center">
+                  <svg
+                    className="w-5 h-5 text-success"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+                    />
+                  </svg>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h4 className="text-body font-semibold text-success mb-1">
+                    Question Voided Successfully
+                  </h4>
+                  <p className="text-body-sm text-[var(--text-secondary)]">
+                    {voidConfirmation.message}
+                  </p>
+                  <p className="text-caption text-[var(--text-muted)] mt-1">
+                    {voidConfirmation.participantsAffected} participant{voidConfirmation.participantsAffected !== 1 ? 's' : ''} notified
+                  </p>
+                </div>
+                {onClearVoidConfirmation && (
+                  <button
+                    onClick={onClearVoidConfirmation}
+                    className="flex-shrink-0 p-1 rounded-full hover:bg-[var(--neu-bg)] transition-colors"
+                  >
+                    <svg
+                      className="w-4 h-4 text-[var(--text-muted)]"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M6 18L18 6M6 6l12 12"
+                      />
+                    </svg>
+                  </button>
+                )}
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Void Question Modal */}
       <VoidQuestionModal
         isOpen={isVoidModalOpen}
         onClose={() => setIsVoidModalOpen(false)}
         onConfirm={handleVoidQuestion}
         questionText={currentQuestion?.questionText || ''}
+      />
+
+      {/* Skip Question Confirmation Modal - Requirements: 5.2 */}
+      <SkipQuestionConfirmModal
+        isOpen={isSkipConfirmOpen}
+        onClose={() => setIsSkipConfirmOpen(false)}
+        onConfirm={handleSkipQuestion}
+        isExamMode={isExamMode}
+        hasMoreQuestions={hasMoreQuestions}
       />
 
       {/* End Quiz Confirmation Modal */}
@@ -566,6 +770,97 @@ function EndQuizConfirmModal({
               onClick={onConfirm}
             >
               {isLastQuestion ? 'Finish Quiz' : 'End Quiz'}
+            </Button>
+          </div>
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+
+/**
+ * Skip Question Confirmation Modal
+ * Requirements: 5.2 - Skip question functionality
+ */
+interface SkipQuestionConfirmModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+  isExamMode: boolean;
+  hasMoreQuestions: boolean;
+}
+
+function SkipQuestionConfirmModal({
+  isOpen,
+  onClose,
+  onConfirm,
+  isExamMode,
+  hasMoreQuestions,
+}: SkipQuestionConfirmModalProps) {
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      {/* Backdrop */}
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+        onClick={onClose}
+      />
+
+      {/* Modal */}
+      <motion.div
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        exit={{ opacity: 0, scale: 0.95 }}
+        className="relative z-10 w-full max-w-md mx-4 neu-raised-lg rounded-xl p-6 bg-[var(--neu-bg)]"
+      >
+        <div className="text-center">
+          <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-warning/10 flex items-center justify-center">
+            <svg
+              className="w-8 h-8 text-warning"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M11.933 12.8a1 1 0 000-1.6L6.6 7.2A1 1 0 005 8v8a1 1 0 001.6.8l5.333-4zM19.933 12.8a1 1 0 000-1.6l-5.333-4A1 1 0 0013 8v8a1 1 0 001.6.8l5.333-4z"
+              />
+            </svg>
+          </div>
+          <h3 className="text-h3 font-semibold text-[var(--text-primary)] mb-2">
+            Skip Current Question?
+          </h3>
+          <p className="text-body text-[var(--text-secondary)] mb-4">
+            This will immediately end the current question timer and notify all participants.
+          </p>
+          {isExamMode ? (
+            <p className="text-body-sm text-info bg-info/10 rounded-lg p-3 mb-6">
+              <strong>Exam Mode:</strong> {hasMoreQuestions 
+                ? 'The quiz will proceed directly to the next question.' 
+                : 'The quiz will end after this question.'}
+            </p>
+          ) : (
+            <p className="text-body-sm text-[var(--text-muted)] mb-6">
+              {hasMoreQuestions 
+                ? 'The reveal screen will be shown before proceeding to the next question.' 
+                : 'The reveal screen will be shown before ending the quiz.'}
+            </p>
+          )}
+          <div className="flex gap-3 justify-center">
+            <Button variant="secondary" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button
+              variant="warning"
+              onClick={onConfirm}
+            >
+              Skip Question
             </Button>
           </div>
         </div>

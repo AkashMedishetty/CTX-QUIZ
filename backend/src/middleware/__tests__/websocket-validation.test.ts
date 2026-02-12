@@ -73,7 +73,7 @@ describe('WebSocket Validation Middleware', () => {
         }
       });
 
-      it('should reject submit_answer with empty selectedOptions', () => {
+      it('should reject submit_answer with empty selectedOptions and no answerText/answerNumber', () => {
         const invalidData = {
           questionId: '550e8400-e29b-41d4-a716-446655440000',
           selectedOptions: [],
@@ -83,9 +83,32 @@ describe('WebSocket Validation Middleware', () => {
         const result = validateMessage('submit_answer', invalidData);
 
         expect(result.success).toBe(false);
-        if (!result.success) {
-          expect(result.errors.some((e) => e.path === 'selectedOptions')).toBe(true);
-        }
+      });
+
+      it('should accept submit_answer with empty selectedOptions when answerNumber is provided', () => {
+        const validData = {
+          questionId: '550e8400-e29b-41d4-a716-446655440000',
+          selectedOptions: [],
+          clientTimestamp: Date.now(),
+          answerNumber: 42,
+        };
+
+        const result = validateMessage('submit_answer', validData);
+
+        expect(result.success).toBe(true);
+      });
+
+      it('should accept submit_answer with empty selectedOptions when answerText is provided', () => {
+        const validData = {
+          questionId: '550e8400-e29b-41d4-a716-446655440000',
+          selectedOptions: [],
+          clientTimestamp: Date.now(),
+          answerText: 'My open-ended answer',
+        };
+
+        const result = validateMessage('submit_answer', validData);
+
+        expect(result.success).toBe(true);
       });
 
       it('should reject submit_answer with negative clientTimestamp', () => {

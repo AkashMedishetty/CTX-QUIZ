@@ -40,14 +40,29 @@ export const questionIdSchema = uuidSchema;
 /**
  * Schema for submit_answer event
  * Requirements: 4.1, 4.2, 4.3
+ * 
+ * Supports multiple question types:
+ * - MULTIPLE_CHOICE, MULTI_SELECT, TRUE_FALSE, SCALE_1_10: Use selectedOptions
+ * - NUMBER_INPUT: Use answerNumber (selectedOptions can be empty)
+ * - OPEN_ENDED: Use answerText (selectedOptions can be empty)
  */
 export const submitAnswerSchema = z.object({
   questionId: questionIdSchema,
-  selectedOptions: z.array(uuidSchema).min(1, 'At least one option must be selected'),
+  selectedOptions: z.array(uuidSchema),
   answerText: z.string().max(5000, 'Answer text must be at most 5000 characters').optional(),
   answerNumber: z.number().optional(),
   clientTimestamp: z.number().int().positive('Client timestamp must be a positive integer'),
-});
+}).refine(
+  (data) => {
+    // At least one of: selectedOptions (non-empty), answerText, or answerNumber must be provided
+    return data.selectedOptions.length > 0 || 
+           data.answerText !== undefined || 
+           data.answerNumber !== undefined;
+  },
+  {
+    message: 'At least one answer type must be provided (selectedOptions, answerText, or answerNumber)',
+  }
+);
 
 /**
  * Schema for reconnect_session event

@@ -14,6 +14,7 @@
  * Includes offline support with answer queuing.
  * 
  * Requirements: 14.1, 14.2, 14.3, 14.4, 14.5, 14.6, 14.7, 14.8, 14.9, 14.10
+ * Requirements: 9.1, 9.2, 9.3 (Focus Monitoring)
  */
 
 'use client';
@@ -28,6 +29,7 @@ import {
 } from '@/hooks/useParticipantSocket';
 import { useOfflineAnswerQueue } from '@/hooks/useOfflineAnswerQueue';
 import { useServiceWorker } from '@/hooks/useServiceWorker';
+import { useFocusMonitoring } from '@/hooks/useFocusMonitoring';
 import { LobbyScreen, QuestionScreen, ResultScreen, OfflineIndicator } from './components';
 
 // ==================== Types ====================
@@ -243,6 +245,8 @@ interface EndedScreenProps {
   personalRank: number | null;
   totalParticipants: number;
   nickname: string;
+  sessionId: string;
+  participantId: string;
   leaderboard?: Array<{
     rank: number;
     participantId: string;
@@ -258,18 +262,76 @@ function EndedScreen({
   personalRank, 
   totalParticipants, 
   nickname,
+  sessionId,
+  participantId,
   leaderboard,
   onJoinAnother 
 }: EndedScreenProps) {
+  // State for answer review data
+  const [answerReviewData, setAnswerReviewData] = React.useState<{
+    questions: Array<{
+      questionId: string;
+      questionText: string;
+      options: Array<{ optionId: string; optionText: string; isCorrect: boolean }>;
+      participantAnswer: string[];
+      correctAnswer: string[];
+      pointsEarned: number;
+      maxPoints: number;
+      explanationText?: string;
+    }>;
+    totalScore: number;
+    totalQuestions: number;
+  } | null>(null);
+  const [isLoadingAnswers, setIsLoadingAnswers] = React.useState(true);
+  const [showAnswerReview, setShowAnswerReview] = React.useState(false);
+
+  // Fetch answer history when component mounts
+  // Requirements: 8.1 - Display all questions with participant answers
+  React.useEffect(() => {
+    const fetchAnswerHistory = async () => {
+      try {
+        const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:3001';
+        const response = await fetch(
+          `${backendUrl}/api/sessions/${sessionId}/participants/${participantId}/answers`
+        );
+        
+        if (response.ok) {
+          const data = await response.json();
+          if (data.success) {
+            setAnswerReviewData({
+              questions: data.answers,
+              totalScore: data.totalScore,
+              totalQuestions: data.totalQuestions,
+            });
+          }
+        }
+      } catch (error) {
+        console.error('[EndedScreen] Failed to fetch answer history:', error);
+      } finally {
+        setIsLoadingAnswers(false);
+      }
+    };
+
+    if (sessionId && participantId) {
+      fetchAnswerHistory();
+    }
+  }, [sessionId, participantId]);
+
+  // Import AnswerReview component dynamically to avoid circular dependencies
+  const AnswerReview = React.useMemo(() => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    return require('./components/AnswerReview').AnswerReview;
+  }, []);
+
   return (
-    <main className="min-h-screen-mobile flex flex-col items-center justify-center p-4 xs-px-tight bg-[var(--neu-bg)] safe-area-inset-y overscroll-none">
+    <main className="min-h-screen-mobile flex flex-col items-center p-4 xs-px-tight bg-[var(--neu-bg)] safe-area-inset-y overscroll-none">
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         className="w-full max-w-md px-2 sm:px-0"
       >
         {/* Trophy Icon */}
-        <div className="text-center mb-4 sm:mb-6">
+        <div className="text-center mb-4 sm:mb-6 mt-4">
           <motion.div
             initial={{ scale: 0 }}
             animate={{ scale: 1 }}
@@ -318,7 +380,7 @@ function EndedScreen({
         </motion.div>
 
         {/* Top 5 Leaderboard */}
-        {leaderboard && leaderboard.length > 0 && (
+        {leaderboard && leaderboard.length > 0 && !showAnswerReview && (
           <motion.div
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
@@ -363,6 +425,61 @@ function EndedScreen({
           </motion.div>
         )}
 
+        {/* Answer Review Section - Requirements: 8.1, 8.2, 8.3, 8.4, 8.5 */}
+        {showAnswerReview && answerReviewData && (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mb-4"
+          >
+            <button
+              onClick={() => setShowAnswerReview(false)}
+              className="flex items-center gap-2 text-sm text-primary mb-3 hover:text-primary-dark transition-colors"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+              </svg>
+              Back to Results
+            </button>
+            <AnswerReview
+              questions={answerReviewData.questions}
+              totalScore={answerReviewData.totalScore}
+              totalQuestions={answerReviewData.totalQuestions}
+            />
+          </motion.div>
+        )}
+
+        {/* View Answers Button */}
+        {!showAnswerReview && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ delay: 0.45 }}
+            className="mb-3"
+          >
+            <button
+              onClick={() => setShowAnswerReview(true)}
+              disabled={isLoadingAnswers || !answerReviewData}
+              className="w-full py-3 sm:py-3.5 px-4 sm:px-6 bg-[var(--neu-surface)] text-[var(--text-primary)] rounded-lg font-medium text-sm sm:text-base
+                         neu-raised-sm hover:bg-[var(--neu-bg)] active:shadow-[inset_2px_2px_4px_rgba(0,0,0,0.1)]
+                         transition-all duration-200 touch-target-48 tap-highlight-none
+                         disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isLoadingAnswers ? (
+                <span className="flex items-center justify-center gap-2">
+                  <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                  </svg>
+                  Loading...
+                </span>
+              ) : (
+                'View All Answers'
+              )}
+            </button>
+          </motion.div>
+        )}
+
         {/* Join Another Button */}
         <motion.div
           initial={{ opacity: 0 }}
@@ -398,6 +515,12 @@ export default function ParticipantPlayPage() {
   
   // State for answer selection
   const [selectedOptions, setSelectedOptions] = React.useState<string[]>([]);
+  
+  // State for number input (NUMBER_INPUT questions)
+  const [numberInputValue, setNumberInputValue] = React.useState<string>('');
+  
+  // State for text input (OPEN_ENDED questions)
+  const [textInputValue, setTextInputValue] = React.useState<string>('');
   
   // State for personal result (from answer_result event)
   const [personalResult, setPersonalResult] = React.useState<{
@@ -471,6 +594,8 @@ export default function ParticipantPlayPage() {
     submitAnswer,
     connect,
     clearSession,
+    emitFocusLost,
+    emitFocusRegained,
   } = useParticipantSocket({
     sessionId,
     participantId: participantData?.participantId || '',
@@ -490,6 +615,9 @@ export default function ParticipantPlayPage() {
       }
       // Reset selected options when a new question starts
       setSelectedOptions([]);
+      // Reset number and text inputs for new question
+      setNumberInputValue('');
+      setTextInputValue('');
       // Reset personal result for new question
       setPersonalResult(null);
       // Store the question data for reveal screen
@@ -507,15 +635,49 @@ export default function ParticipantPlayPage() {
       setLastSelectedOptions([...selectedOptions]);
     },
     onPersonalResult: (result) => {
-      // Store personal result for display in reveal screen
-      setPersonalResult({
-        isCorrect: result.isCorrect,
-        pointsEarned: result.pointsEarned,
-        speedBonus: 0, // Will be calculated from breakdown if available
-        streakBonus: 0,
+      // The answer_result event provides the actual points breakdown
+      // The score_updated event sends pointsEarned: 0 (it's already sent in answer_result)
+      // We only want to set personalResult from the answer_result event
+      // We can detect this by checking if pointsEarned > 0 OR if we don't have a result yet
+      setPersonalResult((prev) => {
+        // If we already have a result with points, don't overwrite with 0
+        if (prev !== null && result.pointsEarned === 0) {
+          return prev;
+        }
+        return {
+          isCorrect: result.isCorrect,
+          pointsEarned: result.pointsEarned,
+          speedBonus: 0,
+          streakBonus: 0,
+        };
       });
     },
   });
+
+  // Focus monitoring integration with WebSocket
+  // Requirements: 9.1, 9.2, 9.3 - Detect visibility changes and emit focus events to server
+  // Property 12: Focus Event Detection and Emission
+  const { isFocused, focusEvents, totalLostTime } = useFocusMonitoring({
+    // Enable focus monitoring when connected and during active quiz states
+    enabled: isConnected && (sessionState?.state === 'ACTIVE_QUESTION' || sessionState?.state === 'REVEAL'),
+    onFocusLost: React.useCallback((timestamp: number) => {
+      // Requirements: 9.2 - Send focus_lost event to server with timestamp
+      console.log('[ParticipantPlayPage] Focus lost at', new Date(timestamp).toISOString());
+      emitFocusLost(timestamp);
+    }, [emitFocusLost]),
+    onFocusRegained: React.useCallback((timestamp: number, durationMs: number) => {
+      // Requirements: 9.3 - Send focus_regained event to server with timestamp and duration
+      console.log('[ParticipantPlayPage] Focus regained at', new Date(timestamp).toISOString(), 'duration:', durationMs, 'ms');
+      emitFocusRegained(timestamp, durationMs);
+    }, [emitFocusRegained]),
+  });
+
+  // Log focus monitoring state for debugging (only in development)
+  React.useEffect(() => {
+    if (process.env.NODE_ENV === 'development' && focusEvents.length > 0) {
+      console.log('[ParticipantPlayPage] Focus state:', { isFocused, eventCount: focusEvents.length, totalLostTime: `${totalLostTime}ms` });
+    }
+  }, [isFocused, focusEvents, totalLostTime]);
 
   // Handle navigation to join page
   const handleGoToJoin = React.useCallback(() => {
@@ -531,7 +693,8 @@ export default function ParticipantPlayPage() {
   // Handle option selection
   const handleSelectOption = React.useCallback((optionId: string) => {
     const questionType = sessionState?.currentQuestion?.questionType;
-    const isMultiAnswer = questionType === 'MULTI_CORRECT' || 
+    const isMultiAnswer = questionType === 'MULTI_SELECT' || 
+                          questionType === 'MULTI_CORRECT' || 
                           questionType === 'MULTIPLE_CHOICE_MULTI';
 
     setSelectedOptions((prev) => {
@@ -550,28 +713,76 @@ export default function ParticipantPlayPage() {
 
   // Handle answer submission (with offline queue support)
   const handleSubmitAnswer = React.useCallback(() => {
-    if (!sessionState?.currentQuestion || selectedOptions.length === 0) return;
-    if (!participantData) return;
+    if (!sessionState?.currentQuestion) {
+      console.log('[PlayPage] Cannot submit - no current question');
+      return;
+    }
+    if (!participantData) {
+      console.log('[PlayPage] Cannot submit - no participant data');
+      return;
+    }
     
     const questionId = sessionState.currentQuestion.questionId;
+    const questionType = sessionState.currentQuestion.questionType;
     
-    // If connected, submit directly
+    console.log('[PlayPage] Submitting answer:', {
+      questionId,
+      questionType,
+      selectedOptions,
+      numberInputValue,
+      textInputValue: textInputValue ? `${textInputValue.substring(0, 30)}...` : undefined,
+      isConnected,
+    });
+    
+    // Determine what to submit based on question type
+    let answerData: string[] = [];
+    let answerNumber: number | undefined;
+    let answerText: string | undefined;
+    
+    if (questionType === 'NUMBER_INPUT') {
+      // For NUMBER_INPUT, submit the number value with empty selectedOptions
+      if (!numberInputValue.trim()) {
+        console.log('[PlayPage] Cannot submit NUMBER_INPUT - no value');
+        return;
+      }
+      answerNumber = parseFloat(numberInputValue);
+      answerData = []; // Empty array - backend accepts this for NUMBER_INPUT
+    } else if (questionType === 'OPEN_ENDED') {
+      // For OPEN_ENDED, submit the text value with empty selectedOptions
+      if (!textInputValue.trim()) {
+        console.log('[PlayPage] Cannot submit OPEN_ENDED - no value');
+        return;
+      }
+      answerText = textInputValue;
+      answerData = []; // Empty array - backend accepts this for OPEN_ENDED
+    } else {
+      // For other question types, use selected options
+      if (selectedOptions.length === 0) {
+        console.log('[PlayPage] Cannot submit - no options selected');
+        return;
+      }
+      answerData = selectedOptions;
+    }
+    
+    // If connected, submit directly with all answer data
     if (isConnected) {
-      submitAnswer(questionId, selectedOptions);
+      console.log('[PlayPage] Submitting via socket:', { answerData, answerNumber, answerText });
+      submitAnswer(questionId, answerData, answerNumber, answerText);
     } else {
       // Queue the answer for later submission when offline
+      console.log('[PlayPage] Queueing answer for offline submission');
       const queued = queueAnswer({
         questionId,
-        selectedOptionIds: selectedOptions,
+        selectedOptionIds: answerData,
         sessionId,
         participantId: participantData.participantId,
       });
       
       if (queued) {
-        console.log('[ParticipantPlayPage] Answer queued for offline submission');
+        console.log('[PlayPage] Answer queued for offline submission');
       }
     }
-  }, [sessionState?.currentQuestion, selectedOptions, submitAnswer, isConnected, queueAnswer, sessionId, participantData]);
+  }, [sessionState?.currentQuestion, selectedOptions, numberInputValue, textInputValue, submitAnswer, isConnected, queueAnswer, sessionId, participantData]);
 
   // Flush offline queue when reconnected
   React.useEffect(() => {
@@ -620,6 +831,13 @@ export default function ParticipantPlayPage() {
             pendingCount={pendingCount}
             queueStatus={queueStatus}
           />
+          {sessionState?.examMode?.negativeMarkingEnabled && (
+            <div className="w-full bg-warning/10 border border-warning/30 rounded-lg p-3 mx-auto max-w-md mt-2" style={{ position: 'relative', zIndex: 10 }}>
+              <p className="text-sm text-warning font-medium text-center">
+                ⚠️ Negative marking is active — {sessionState.examMode.negativeMarkingPercentage}% deduction for wrong answers
+              </p>
+            </div>
+          )}
           <LobbyScreen
             nickname={nickname}
             participantCount={participantCount}
@@ -641,6 +859,13 @@ export default function ParticipantPlayPage() {
               pendingCount={pendingCount}
               queueStatus={queueStatus}
             />
+            {sessionState?.examMode?.negativeMarkingEnabled && (
+              <div className="w-full bg-warning/10 border border-warning/30 rounded-lg p-3 mx-auto max-w-md mt-2" style={{ position: 'relative', zIndex: 10 }}>
+                <p className="text-sm text-warning font-medium text-center">
+                  ⚠️ Negative marking is active — {sessionState.examMode.negativeMarkingPercentage}% deduction for wrong answers
+                </p>
+              </div>
+            )}
             <QuestionScreen
               question={{
                 questionId: sessionState.currentQuestion.questionId,
@@ -662,6 +887,10 @@ export default function ParticipantPlayPage() {
               currentStreak={sessionState.streakCount}
               isSpectator={sessionState.isSpectator}
               isEliminated={sessionState.isEliminated}
+              numberInputValue={numberInputValue}
+              onNumberInputChange={setNumberInputValue}
+              textInputValue={textInputValue}
+              onTextInputChange={setTextInputValue}
             />
           </>
         );
@@ -712,6 +941,8 @@ export default function ParticipantPlayPage() {
           personalRank={sessionState?.personalRank ?? null}
           totalParticipants={sessionState?.participantCount ?? 0}
           nickname={nickname}
+          sessionId={sessionId}
+          participantId={participantData?.participantId || ''}
           leaderboard={sessionState?.leaderboard}
           onJoinAnother={handleGoToJoin}
         />

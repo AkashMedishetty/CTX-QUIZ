@@ -28,17 +28,18 @@ export const metadata: Metadata = {
     template: '%s | CTX Quiz',
   },
   description: 'Real-time synchronized quiz platform for live events',
+  icons: {
+    icon: '/favicon.svg',
+    shortcut: '/favicon.svg',
+    apple: '/icons/icon-192x192.svg',
+  },
   keywords: ['quiz', 'live quiz', 'real-time', 'events', 'conference', 'game show'],
   authors: [{ name: 'CTX', url: 'https://ctx.works' }],
   creator: 'CTX',
   publisher: 'CTX Quiz',
   metadataBase: new URL('https://ctx.works'),
   manifest: '/manifest.json',
-  appleWebApp: {
-    capable: true,
-    statusBarStyle: 'default',
-    title: 'CTX Quiz',
-  },
+  // Note: mobile-web-app-capable is handled by the manifest.json display: standalone
   openGraph: {
     type: 'website',
     locale: 'en_US',

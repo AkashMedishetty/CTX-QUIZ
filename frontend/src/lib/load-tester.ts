@@ -19,6 +19,37 @@ import { WebSocketLogger, websocketLogger } from './websocket-logger';
 // ==================== Types ====================
 
 /**
+ * Rate limiting configuration for load testing
+ * 
+ * Requirements: 1.1, 1.4
+ */
+export interface RateLimitConfig {
+  /** Maximum requests per second (default: 10) */
+  requestsPerSecond: number;
+  /** Burst limit for initial joins (default: 20) */
+  burstLimit: number;
+  /** Base delay between requests in ms (default: 50) */
+  baseDelayMs: number;
+  /** Maximum retry attempts (default: 5) */
+  maxRetries: number;
+  /** Backoff multiplier for retries (default: 2) */
+  backoffMultiplier: number;
+}
+
+/**
+ * Default rate limit configuration values
+ * 
+ * Requirements: 1.1, 1.4
+ */
+export const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
+  requestsPerSecond: 10,
+  burstLimit: 20,
+  baseDelayMs: 50,
+  maxRetries: 5,
+  backoffMultiplier: 2,
+};
+
+/**
  * Load test configuration
  */
 export interface LoadTestConfig {
@@ -34,6 +65,8 @@ export interface LoadTestConfig {
   answerDelayMinMs?: number;
   /** Max delay before answering in ms (default: 5000) */
   answerDelayMaxMs?: number;
+  /** Rate limiting configuration for join requests */
+  rateLimitConfig?: RateLimitConfig;
 }
 
 /**
@@ -50,6 +83,8 @@ export interface SimulatedParticipant {
   error: string | null;
   joinedAt: number | null;
   answersSubmitted: number;
+  /** Number of answers rejected by the server (Requirements: 3.4) */
+  answersRejected: number;
   lastLatencyMs: number | null;
   /** Last recorded timer drift in ms (server time - client time) */
   lastDriftMs: number | null;
@@ -164,6 +199,24 @@ export interface LatencyPercentiles {
 /**
  * Load test statistics
  */
+/**
+ * Answer submission statistics for tracking success/failure rates
+ * 
+ * Requirements: 3.4
+ */
+export interface AnswerSubmissionStats {
+  /** Total number of answer submissions attempted */
+  totalAttempted: number;
+  /** Number of successful answer submissions (answer_accepted) */
+  successfulSubmissions: number;
+  /** Number of failed answer submissions (answer_rejected) */
+  failedSubmissions: number;
+  /** Success rate as percentage (0-100) */
+  successRate: number;
+  /** Failure rate as percentage (0-100) */
+  failureRate: number;
+}
+
 export interface LoadTestStats {
   totalParticipants: number;
   pendingJoins: number;
@@ -172,6 +225,10 @@ export interface LoadTestStats {
   connectedCount: number;
   disconnectedCount: number;
   totalAnswersSubmitted: number;
+  /** Total answers rejected by the server (Requirements: 3.4) */
+  totalAnswersRejected: number;
+  /** Answer submission statistics (Requirements: 3.4) */
+  answerSubmissions: AnswerSubmissionStats;
   averageLatencyMs: number | null;
   minLatencyMs: number | null;
   maxLatencyMs: number | null;
@@ -400,6 +457,23 @@ export class LoadTester {
       driftHistory: [...this.driftHistory],
     };
 
+    // Calculate answer submission statistics (Requirements: 3.4)
+    const totalAnswersSubmitted = participants.reduce((sum, p) => sum + p.answersSubmitted, 0);
+    const totalAnswersRejected = participants.reduce((sum, p) => sum + p.answersRejected, 0);
+    const totalAnswerAttempts = totalAnswersSubmitted + totalAnswersRejected;
+    
+    const answerSubmissions: AnswerSubmissionStats = {
+      totalAttempted: totalAnswerAttempts,
+      successfulSubmissions: totalAnswersSubmitted,
+      failedSubmissions: totalAnswersRejected,
+      successRate: totalAnswerAttempts > 0
+        ? Math.round((totalAnswersSubmitted / totalAnswerAttempts) * 100)
+        : 0,
+      failureRate: totalAnswerAttempts > 0
+        ? Math.round((totalAnswersRejected / totalAnswerAttempts) * 100)
+        : 0,
+    };
+
     const stats: LoadTestStats = {
       totalParticipants: this.config?.participantCount || 0,
       pendingJoins: participants.filter(p => p.status === 'pending' || p.status === 'joining').length,
@@ -407,7 +481,9 @@ export class LoadTester {
       failedJoins: participants.filter(p => p.status === 'error').length,
       connectedCount: participants.filter(p => p.status === 'connected').length,
       disconnectedCount: participants.filter(p => p.status === 'disconnected').length,
-      totalAnswersSubmitted: participants.reduce((sum, p) => sum + p.answersSubmitted, 0),
+      totalAnswersSubmitted,
+      totalAnswersRejected,
+      answerSubmissions,
       averageLatencyMs: latencies.length > 0 
         ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length) 
         : null,
@@ -450,6 +526,10 @@ export class LoadTester {
       simulateAnswers: config.simulateAnswers ?? true,
       answerDelayMinMs: config.answerDelayMinMs ?? 500,
       answerDelayMaxMs: config.answerDelayMaxMs ?? 5000,
+      rateLimitConfig: {
+        ...DEFAULT_RATE_LIMIT_CONFIG,
+        ...config.rateLimitConfig,
+      },
     };
 
     this.isStopRequested = false;
@@ -475,6 +555,7 @@ export class LoadTester {
         error: null,
         joinedAt: null,
         answersSubmitted: 0,
+        answersRejected: 0,
         lastLatencyMs: null,
         lastDriftMs: null,
         driftHistory: [],
@@ -663,25 +744,125 @@ export class LoadTester {
   }
 
   /**
-   * Join a single participant
+   * Check if an error is a rate limit error (HTTP 429 or rate limit message)
+   * 
+   * Requirements: 1.2
+   */
+  private isRateLimitError(error: unknown): boolean {
+    if (error instanceof Error) {
+      const message = error.message.toLowerCase();
+      // Check for HTTP 429 status or rate limit related messages
+      return (
+        message.includes('429') ||
+        message.includes('rate limit') ||
+        message.includes('too many requests') ||
+        message.includes('throttle') ||
+        message.includes('slow down')
+      );
+    }
+    return false;
+  }
+
+  /**
+   * Calculate exponential backoff delay
+   * 
+   * Formula: baseDelayMs × (backoffMultiplier ^ retryAttempt)
+   * 
+   * Requirements: 1.2, 1.3
+   * Design Property 2: Exponential Backoff on Rate Limit Errors
+   * 
+   * @param retryAttempt - The current retry attempt (0-indexed)
+   * @returns The delay in milliseconds before the next retry
+   */
+  calculateBackoffDelay(retryAttempt: number): number {
+    const config = this.config?.rateLimitConfig ?? DEFAULT_RATE_LIMIT_CONFIG;
+    return config.baseDelayMs * Math.pow(config.backoffMultiplier, retryAttempt);
+  }
+
+  /**
+   * Join a single participant with exponential backoff retry logic
+   * 
+   * Requirements: 1.2, 1.3
+   * Design Property 2: Exponential Backoff on Rate Limit Errors
    */
   private async joinParticipant(participant: SimulatedParticipant): Promise<void> {
     participant.status = 'joining';
     this.callbacks.onParticipantUpdate?.(participant);
 
-    // Call join API
-    const response = await post<JoinResponse>('/sessions/join', {
-      joinCode: this.config!.joinCode,
-      nickname: participant.nickname,
-    });
+    const rateLimitConfig = this.config?.rateLimitConfig ?? DEFAULT_RATE_LIMIT_CONFIG;
+    const maxRetries = rateLimitConfig.maxRetries;
+    let lastError: Error | null = null;
 
-    participant.participantId = response.participantId;
-    participant.sessionId = response.sessionId;
-    participant.token = response.sessionToken;
-    participant.joinedAt = Date.now();
+    for (let retryAttempt = 0; retryAttempt <= maxRetries; retryAttempt++) {
+      try {
+        // Call join API
+        const response = await post<JoinResponse>('/sessions/join', {
+          joinCode: this.config!.joinCode,
+          nickname: participant.nickname,
+        });
 
-    // Create WebSocket connection
-    await this.connectParticipant(participant);
+        participant.participantId = response.participantId;
+        participant.sessionId = response.sessionId;
+        participant.token = response.sessionToken;
+        participant.joinedAt = Date.now();
+
+        // Create WebSocket connection
+        await this.connectParticipant(participant);
+        
+        // Success - exit retry loop
+        return;
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+
+        // Check if this is a rate limit error
+        if (this.isRateLimitError(error)) {
+          // Check if we have retries remaining
+          if (retryAttempt < maxRetries) {
+            // Calculate backoff delay: baseDelayMs × (backoffMultiplier ^ retryAttempt)
+            const backoffDelay = this.calculateBackoffDelay(retryAttempt);
+            
+            // Log the rate limit error and retry attempt
+            console.warn(
+              `[LoadTester] Rate limit error for participant ${participant.id} (${participant.nickname}). ` +
+              `Retry ${retryAttempt + 1}/${maxRetries} after ${backoffDelay}ms delay. ` +
+              `Error: ${lastError.message}`
+            );
+
+            // Wait for backoff delay before retrying
+            await sleep(backoffDelay);
+            
+            // Continue to next retry attempt
+            continue;
+          } else {
+            // Max retries exceeded for rate limit error
+            console.error(
+              `[LoadTester] Rate limit error for participant ${participant.id} (${participant.nickname}). ` +
+              `Max retries (${maxRetries}) exceeded. Error: ${lastError.message}`
+            );
+          }
+        }
+
+        // Non-rate-limit error or max retries exceeded - log diagnostic info and throw
+        // Requirements: 2.4 - Include error code, message, URL, and participant ID
+        console.error(
+          `[LoadTester] Join failed for participant ${participant.id} (${participant.nickname}):`,
+          {
+            code: (lastError as any).code || 'UNKNOWN',
+            message: lastError.message,
+            url: '/sessions/join',
+            participantId: participant.id,
+            nickname: participant.nickname,
+            retryAttempt,
+          }
+        );
+        throw lastError;
+      }
+    }
+
+    // This should not be reached, but handle it just in case
+    if (lastError) {
+      throw lastError;
+    }
   }
 
   /**
@@ -785,10 +966,23 @@ export class LoadTester {
       });
 
       // Handle answer rejected event
-      socket.on('answer_rejected', (data: { reason: string; message: string }) => {
+      // Requirements: 3.3, 3.4 - Log rejection reason and track failure statistics
+      socket.on('answer_rejected', (data: { reason: string; message: string; questionId?: string }) => {
+        // Log the rejection for debugging (Requirements: 3.3)
         if (this.loggingEnabled && this.logger) {
           this.logger.logReceive('answer_rejected', data, socket.id, participant.id);
         }
+        
+        // Always log rejection reason for debugging, even if logging is disabled
+        console.warn(
+          `[LoadTester] Answer rejected for participant ${participant.id} (${participant.nickname}). ` +
+          `Reason: ${data.reason}. Message: ${data.message}. ` +
+          `QuestionId: ${data.questionId || 'unknown'}`
+        );
+        
+        // Track failed submission in statistics (Requirements: 3.4)
+        participant.answersRejected++;
+        this.callbacks.onParticipantUpdate?.(participant);
       });
 
       // Handle leaderboard updates
@@ -1384,7 +1578,18 @@ export class LoadTester {
     lines.push(`Connected Count,${data.summary.connectedCount}`);
     lines.push(`Disconnected Count,${data.summary.disconnectedCount}`);
     lines.push(`Total Answers Submitted,${data.summary.totalAnswersSubmitted}`);
+    lines.push(`Total Answers Rejected,${data.summary.totalAnswersRejected}`);
     lines.push(`Test Duration (ms),${data.metadata.testDurationMs}`);
+    lines.push('');
+
+    // Section 2.5: Answer Submission Statistics (Requirements: 3.4)
+    lines.push('## ANSWER SUBMISSION STATISTICS');
+    lines.push('Metric,Value');
+    lines.push(`Total Attempted,${data.answerSubmissions.totalAttempted}`);
+    lines.push(`Successful Submissions,${data.answerSubmissions.successfulSubmissions}`);
+    lines.push(`Failed Submissions,${data.answerSubmissions.failedSubmissions}`);
+    lines.push(`Success Rate (%),${data.answerSubmissions.successRate}`);
+    lines.push(`Failure Rate (%),${data.answerSubmissions.failureRate}`);
     lines.push('');
 
     // Section 3: Latency Metrics
@@ -1449,13 +1654,14 @@ export class LoadTester {
 
     // Section 9: Participant Details
     lines.push('## PARTICIPANT DETAILS');
-    lines.push('ID,Nickname,Status,Answers Submitted,Last Latency (ms),Last Drift (ms),Error');
+    lines.push('ID,Nickname,Status,Answers Submitted,Answers Rejected,Last Latency (ms),Last Drift (ms),Error');
     for (const p of data.participants) {
       lines.push([
         p.id.toString(),
         escapeCSVField(p.nickname),
         p.status,
         p.answersSubmitted.toString(),
+        p.answersRejected.toString(),
         p.lastLatencyMs?.toString() ?? 'N/A',
         p.lastDriftMs?.toString() ?? 'N/A',
         escapeCSVField(p.error ?? ''),
@@ -1513,6 +1719,14 @@ export class LoadTester {
         connectedCount: stats.connectedCount,
         disconnectedCount: stats.disconnectedCount,
         totalAnswersSubmitted: stats.totalAnswersSubmitted,
+        totalAnswersRejected: stats.totalAnswersRejected,
+      },
+      answerSubmissions: {
+        totalAttempted: stats.answerSubmissions.totalAttempted,
+        successfulSubmissions: stats.answerSubmissions.successfulSubmissions,
+        failedSubmissions: stats.answerSubmissions.failedSubmissions,
+        successRate: stats.answerSubmissions.successRate,
+        failureRate: stats.answerSubmissions.failureRate,
       },
       latency: {
         averageMs: stats.averageLatencyMs,
@@ -1556,6 +1770,7 @@ export class LoadTester {
         nickname: p.nickname,
         status: p.status,
         answersSubmitted: p.answersSubmitted,
+        answersRejected: p.answersRejected,
         lastLatencyMs: p.lastLatencyMs,
         lastDriftMs: p.lastDriftMs,
         error: p.error,
@@ -1634,6 +1849,16 @@ export interface PerformanceExportData {
     connectedCount: number;
     disconnectedCount: number;
     totalAnswersSubmitted: number;
+    /** Total answers rejected by the server (Requirements: 3.4) */
+    totalAnswersRejected: number;
+  };
+  /** Answer submission statistics (Requirements: 3.4) */
+  answerSubmissions: {
+    totalAttempted: number;
+    successfulSubmissions: number;
+    failedSubmissions: number;
+    successRate: number;
+    failureRate: number;
   };
   /** Latency metrics */
   latency: {
@@ -1685,6 +1910,8 @@ export interface PerformanceExportData {
     nickname: string;
     status: string;
     answersSubmitted: number;
+    /** Number of answers rejected by the server (Requirements: 3.4) */
+    answersRejected: number;
     lastLatencyMs: number | null;
     lastDriftMs: number | null;
     error: string | null;

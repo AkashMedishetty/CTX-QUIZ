@@ -78,6 +78,14 @@ const buttonVariants = cva(
           'active:shadow-[inset_2px_2px_4px_rgba(0,0,0,0.2)]',
           'focus-visible:ring-error',
         ],
+        // Warning - Amber/Orange neumorphic
+        warning: [
+          'bg-warning text-white',
+          'shadow-[4px_4px_8px_var(--shadow-dark),-4px_-4px_8px_var(--shadow-light)]',
+          'hover:brightness-110 hover:shadow-[2px_2px_4px_var(--shadow-dark),-2px_-2px_4px_var(--shadow-light)]',
+          'active:shadow-[inset_2px_2px_4px_rgba(0,0,0,0.2)]',
+          'focus-visible:ring-warning',
+        ],
         // Accent - CTX accent purple (use sparingly)
         accent: [
           'bg-accent text-white',

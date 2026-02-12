@@ -20,6 +20,7 @@
 import * as React from 'react';
 import { motion } from 'framer-motion';
 import { SpectatorBadge } from './spectator-badge';
+import { CopyPrevention } from '@/components/CopyPrevention';
 
 // ==================== Types ====================
 
@@ -953,28 +954,31 @@ export function ResultScreen({
         )}
 
         {/* Answer options with highlighting */}
-        <motion.div variants={itemVariants} className="mb-4 sm:mb-6">
-          <h3 className="text-xs sm:text-sm font-semibold text-[var(--text-secondary)] mb-2 sm:mb-3 uppercase tracking-wide">
-            {isSpectator ? 'Correct Answer' : isCorrect ? 'Your Answer' : 'Correct Answer'}
-          </h3>
-          <div className="space-y-1.5 sm:space-y-2">
-            {question.options.map((option, index) => (
-              <AnswerOption
-                key={option.optionId}
-                option={option}
-                label={OPTION_LABELS[index] || String(index + 1)}
-                isCorrect={correctOptions.includes(option.optionId)}
-                isSelected={isSpectator ? false : selectedOptions.includes(option.optionId)}
-                index={index}
-              />
-            ))}
-          </div>
-        </motion.div>
+        {/* Wrapped with CopyPrevention to prevent copying quiz content (Requirements: 7.1, 7.2, 7.3, 7.4) */}
+        <CopyPrevention>
+          <motion.div variants={itemVariants} className="mb-4 sm:mb-6">
+            <h3 className="text-xs sm:text-sm font-semibold text-[var(--text-secondary)] mb-2 sm:mb-3 uppercase tracking-wide">
+              {isSpectator ? 'Correct Answer' : isCorrect ? 'Your Answer' : 'Correct Answer'}
+            </h3>
+            <div className="space-y-1.5 sm:space-y-2">
+              {question.options.map((option, index) => (
+                <AnswerOption
+                  key={option.optionId}
+                  option={option}
+                  label={OPTION_LABELS[index] || String(index + 1)}
+                  isCorrect={correctOptions.includes(option.optionId)}
+                  isSelected={isSpectator ? false : selectedOptions.includes(option.optionId)}
+                  index={index}
+                />
+              ))}
+            </div>
+          </motion.div>
 
-        {/* Explanation text */}
-        {explanationText && (
-          <ExplanationSection text={explanationText} />
-        )}
+          {/* Explanation text */}
+          {explanationText && (
+            <ExplanationSection text={explanationText} />
+          )}
+        </CopyPrevention>
 
         {/* Leaderboard for spectators */}
         {isSpectator && leaderboard && leaderboard.length > 0 && (

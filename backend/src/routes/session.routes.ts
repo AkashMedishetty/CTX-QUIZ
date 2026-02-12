@@ -20,7 +20,7 @@ import { createSessionRequestSchema, joinSessionRequestSchema, validateRequest, 
 import { profanityFilterService } from '../services/profanity-filter.service';
 import { rateLimiterService } from '../services/rate-limiter.service';
 import { generateParticipantToken } from '../middleware/socket-auth';
-import type { Quiz, Session, Participant } from '../models/types';
+import type { Quiz, Session, Participant, QuizExamSettings, ExamModeConfig } from '../models/types';
 
 const router = Router();
 
@@ -57,6 +57,39 @@ async function generateUniqueJoinCode(): Promise<string> {
 
   // If we couldn't generate a unique code after 10 attempts, throw error
   throw new Error('Failed to generate unique join code after multiple attempts');
+}
+
+/**
+ * Map quiz-level exam settings to session-level exam mode configuration.
+ * 
+ * Returns undefined when:
+ * - Input is undefined
+ * - Both negativeMarkingEnabled and focusMonitoringEnabled are false
+ * 
+ * Sets skipRevealPhase and autoAdvance to false as defaults.
+ * 
+ * Requirements: 1.1, 1.2, 1.3, 1.4, 1.5
+ */
+export function mapExamSettingsToExamMode(
+  examSettings?: QuizExamSettings
+): ExamModeConfig | undefined {
+  if (!examSettings) return undefined;
+  // Create exam mode config if any exam feature is enabled
+  const hasAnyExamFeature = 
+    examSettings.negativeMarkingEnabled || 
+    examSettings.focusMonitoringEnabled ||
+    examSettings.skipRevealPhase ||
+    examSettings.autoAdvance;
+  if (!hasAnyExamFeature) {
+    return undefined;
+  }
+  return {
+    skipRevealPhase: examSettings.skipRevealPhase ?? false,
+    negativeMarkingEnabled: examSettings.negativeMarkingEnabled,
+    negativeMarkingPercentage: examSettings.negativeMarkingPercentage,
+    focusMonitoringEnabled: examSettings.focusMonitoringEnabled,
+    autoAdvance: examSettings.autoAdvance ?? false,
+  };
 }
 
 /**
@@ -129,6 +162,7 @@ router.post(
 
       // Create session document
       const now = new Date();
+      const examMode = mapExamSettingsToExamMode(quiz.examSettings);
       const session: Session = {
         sessionId,
         quizId: quizObjectId,
@@ -140,6 +174,7 @@ router.post(
         eliminatedParticipants: [],
         voidedQuestions: [],
         allowLateJoiners: true, // Default to allowing late joiners
+        examMode,
         createdAt: now,
         hostId: 'admin', // TODO: Replace with actual authenticated user ID when auth is implemented
       };
@@ -174,6 +209,7 @@ router.post(
           state: session.state,
           currentQuestionIndex: session.currentQuestionIndex,
           participantCount: session.participantCount,
+          examMode: session.examMode,
           createdAt: session.createdAt,
         },
         quiz: {
@@ -265,6 +301,7 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
           state: session.state,
           currentQuestionIndex: session.currentQuestionIndex,
           participantCount: session.participantCount,
+          examMode: session.examMode || null,
           createdAt: session.createdAt,
           startedAt: session.startedAt,
           endedAt: session.endedAt,
@@ -509,6 +546,58 @@ router.post(
         return;
       }
 
+      // 6b. Check tournament elimination enforcement
+      // If this session belongs to a tournament round (not round 1), verify participant is qualified
+      if (session.tournamentId && session.tournamentRoundNumber && session.tournamentRoundNumber > 1) {
+        const { tournamentService } = await import('../services/tournament.service');
+        
+        // For tournament rounds after the first, we need to check if this participant
+        // was qualified from the previous round. Since this is a new join, we check
+        // if the nickname matches any qualified participant from the previous round.
+        const tournament = await tournamentService.getTournament(session.tournamentId);
+        
+        if (tournament) {
+          const roundIndex = session.tournamentRoundNumber - 1;
+          const round = tournament.rounds[roundIndex];
+          
+          if (round && round.qualifiedParticipants.length > 0) {
+            // Get the previous round's session to check participant nicknames
+            const prevRound = tournament.rounds[roundIndex - 1];
+            if (prevRound?.sessionId) {
+              const prevParticipantsCollection = mongodbService.getCollection<Participant>('participants');
+              const prevParticipants = await prevParticipantsCollection
+                .find({
+                  sessionId: prevRound.sessionId,
+                  participantId: { $in: round.qualifiedParticipants },
+                })
+                .toArray();
+              
+              const qualifiedNicknames = prevParticipants.map(p => p.nickname.toLowerCase());
+              
+              if (!qualifiedNicknames.includes(nickname.trim().toLowerCase())) {
+                console.warn(`[Session] Eliminated participant attempted to join tournament round: ${nickname}`);
+                
+                await securityLoggingService.logFailedJoinAttempt({
+                  reason: 'INVALID_JOIN_CODE', // Use existing reason type
+                  joinCode,
+                  nickname,
+                  ipAddress,
+                  sessionId,
+                  message: 'Participant was eliminated in previous tournament round',
+                });
+                
+                res.status(403).json({
+                  success: false,
+                  error: 'Not qualified',
+                  message: 'You were eliminated in a previous round and cannot join this tournament round.',
+                });
+                return;
+              }
+            }
+          }
+        }
+      }
+
       // 7. Create participant record
       const participantId = uuidv4();
       const now = new Date();
@@ -720,6 +809,7 @@ router.get('/:sessionId', async (req: Request, res: Response): Promise<void> => 
       activeParticipants: session.activeParticipants,
       eliminatedParticipants: session.eliminatedParticipants,
       voidedQuestions: session.voidedQuestions,
+      examMode: session.examMode || null,
       createdAt: session.createdAt,
       startedAt: session.startedAt,
       endedAt: session.endedAt,
@@ -1307,6 +1397,15 @@ router.post('/:sessionId/export', async (req: Request, res: Response): Promise<v
         .toArray();
     });
 
+    // Get audit logs for this session (focus events, disconnections, etc.)
+    const auditLogsCollection = mongodbService.getCollection('auditLogs');
+    const auditLogs = await mongodbService.withRetry(async () => {
+      return await auditLogsCollection
+        .find({ sessionId })
+        .sort({ timestamp: 1 })
+        .toArray();
+    });
+
     // Group answers by participantId
     const answersByParticipant = new Map<string, any[]>();
     for (const answer of answers) {
@@ -1316,9 +1415,27 @@ router.post('/:sessionId/export', async (req: Request, res: Response): Promise<v
     }
 
     // Build leaderboard with answer history
-    const leaderboard = participants.map((participant: any, index: number) => {
+    // Compute scores from actual answers as authoritative source
+    // (MongoDB participant.totalScore may be stale if Redis wasn't flushed)
+    const leaderboard = participants.map((participant: any) => {
       const participantAnswers = answersByParticipant.get(participant.participantId) || [];
       
+      // Compute total score from answers (authoritative)
+      const computedScore = participantAnswers.reduce(
+        (sum: number, a: any) => sum + (a.pointsAwarded || 0), 0
+      );
+      const computedTimeMs = participantAnswers.reduce(
+        (sum: number, a: any) => sum + (a.responseTimeMs || 0), 0
+      );
+
+      // Use computed score if MongoDB score is 0 but answers exist
+      const totalScore = (participant.totalScore || 0) > 0
+        ? participant.totalScore
+        : computedScore;
+      const totalTimeMs = (participant.totalTimeMs || 0) > 0
+        ? participant.totalTimeMs
+        : computedTimeMs;
+
       const answerHistory = participantAnswers.map((answer: any) => {
         const question = questionMap.get(answer.questionId);
         return {
@@ -1335,11 +1452,11 @@ router.post('/:sessionId/export', async (req: Request, res: Response): Promise<v
       });
 
       return {
-        rank: index + 1,
+        rank: 0, // Will be set after sorting
         participantId: participant.participantId,
         nickname: participant.nickname,
-        totalScore: participant.totalScore,
-        totalTimeMs: participant.totalTimeMs,
+        totalScore,
+        totalTimeMs,
         isActive: participant.isActive,
         isEliminated: participant.isEliminated,
         joinedAt: participant.joinedAt,
@@ -1347,9 +1464,16 @@ router.post('/:sessionId/export', async (req: Request, res: Response): Promise<v
       };
     });
 
-    // Calculate statistics
-    const activeParticipants = participants.filter((p: any) => p.isActive);
-    const totalParticipants = participants.length;
+    // Sort by score desc, then time asc, then assign ranks
+    leaderboard.sort((a: any, b: any) => {
+      if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
+      return a.totalTimeMs - b.totalTimeMs;
+    });
+    leaderboard.forEach((entry: any, idx: number) => { entry.rank = idx + 1; });
+
+    // Calculate statistics from the corrected leaderboard
+    const activeParticipants = leaderboard.filter((p: any) => p.isActive);
+    const totalParticipants = leaderboard.length;
     const totalQuestions = quiz.questions.length;
     const averageScore = activeParticipants.length > 0
       ? activeParticipants.reduce((sum: number, p: any) => sum + p.totalScore, 0) / activeParticipants.length
@@ -1366,6 +1490,7 @@ router.post('/:sessionId/export', async (req: Request, res: Response): Promise<v
         quizId: session.quizId.toString(),
         joinCode: session.joinCode,
         state: session.state,
+        examMode: session.examMode || null,
         createdAt: session.createdAt,
         startedAt: session.startedAt,
         endedAt: session.endedAt,
@@ -1411,6 +1536,13 @@ router.post('/:sessionId/export', async (req: Request, res: Response): Promise<v
         speedBonusApplied: a.speedBonusApplied,
         streakBonusApplied: a.streakBonusApplied,
         partialCreditApplied: a.partialCreditApplied,
+        negativeDeductionApplied: a.negativeDeductionApplied,
+      })),
+      auditLogs: auditLogs.map((log: any) => ({
+        timestamp: log.timestamp,
+        eventType: log.eventType,
+        participantId: log.participantId || null,
+        details: log.details || {},
       })),
     };
 
@@ -1423,7 +1555,7 @@ router.post('/:sessionId/export', async (req: Request, res: Response): Promise<v
       res.status(200).send(JSON.stringify(exportData, null, 2));
     } else {
       // Generate CSV
-      const csvContent = generateCSV(exportData, quiz, leaderboard, answers);
+      const csvContent = generateCSV(exportData, quiz, leaderboard, answers, auditLogs);
       res.setHeader('Content-Type', 'text/csv');
       res.setHeader('Content-Disposition', `attachment; filename="${filename}.csv"`);
       res.status(200).send(csvContent);
@@ -1441,19 +1573,165 @@ router.post('/:sessionId/export', async (req: Request, res: Response): Promise<v
 });
 
 /**
+ * GET /api/sessions/:sessionId/participants/:participantId/answers
+ * 
+ * Get answer history for a specific participant in a session
+ * Returns all answers with question details for the answer review screen
+ * 
+ * Response:
+ * - 200: Answer history retrieved successfully
+ *   {
+ *     success: true,
+ *     answers: Array<{
+ *       questionId: string,
+ *       questionText: string,
+ *       options: Array<{ optionId: string, optionText: string, isCorrect: boolean }>,
+ *       participantAnswer: string[],
+ *       correctAnswer: string[],
+ *       pointsEarned: number,
+ *       maxPoints: number,
+ *       explanationText?: string
+ *     }>,
+ *     totalScore: number,
+ *     totalQuestions: number
+ *   }
+ * - 404: Session or participant not found
+ * - 500: Server error
+ * 
+ * Requirements: 8.1
+ */
+router.get(
+  '/:sessionId/participants/:participantId/answers',
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const { sessionId, participantId } = req.params;
+
+      // Get session from MongoDB
+      const sessionsCollection = mongodbService.getCollection<Session>('sessions');
+      const session = await mongodbService.withRetry(async () => {
+        return await sessionsCollection.findOne({ sessionId });
+      });
+
+      if (!session) {
+        res.status(404).json({
+          success: false,
+          error: 'Session not found',
+          message: `No session found with ID: ${sessionId}`,
+        });
+        return;
+      }
+
+      // Verify participant exists in this session
+      const participantsCollection = mongodbService.getCollection<Participant>('participants');
+      const participant = await mongodbService.withRetry(async () => {
+        return await participantsCollection.findOne({ participantId, sessionId });
+      });
+
+      if (!participant) {
+        res.status(404).json({
+          success: false,
+          error: 'Participant not found',
+          message: `No participant found with ID: ${participantId} in session ${sessionId}`,
+        });
+        return;
+      }
+
+      // Get quiz details for question information
+      const quizzesCollection = mongodbService.getCollection<Quiz>('quizzes');
+      const quiz = await mongodbService.withRetry(async () => {
+        return await quizzesCollection.findOne({ _id: session.quizId });
+      });
+
+      if (!quiz) {
+        res.status(404).json({
+          success: false,
+          error: 'Quiz not found',
+          message: `Quiz not found for session ${sessionId}`,
+        });
+        return;
+      }
+
+      // Get all answers for this participant in this session
+      const answersCollection = mongodbService.getCollection('answers');
+      const answers = await mongodbService.withRetry(async () => {
+        return await answersCollection
+          .find({ sessionId, participantId })
+          .sort({ submittedAt: 1 })
+          .toArray();
+      });
+
+      // Create a map of answers by questionId for quick lookup
+      const answerMap = new Map<string, any>();
+      for (const answer of answers) {
+        answerMap.set(answer.questionId, answer);
+      }
+
+      // Build the answer review data by joining questions with answers
+      const answerReviewData = quiz.questions.map((question) => {
+        const answer = answerMap.get(question.questionId);
+        const correctOptions = question.options
+          .filter((opt) => opt.isCorrect)
+          .map((opt) => opt.optionId);
+
+        return {
+          questionId: question.questionId,
+          questionText: question.questionText,
+          options: question.options.map((opt) => ({
+            optionId: opt.optionId,
+            optionText: opt.optionText,
+            isCorrect: opt.isCorrect,
+          })),
+          participantAnswer: answer?.selectedOptions || [],
+          correctAnswer: correctOptions,
+          pointsEarned: answer?.pointsAwarded || 0,
+          maxPoints: question.scoring.basePoints,
+          explanationText: question.explanationText,
+        };
+      });
+
+      // Calculate total score from answers
+      const totalScore = answers.reduce((sum: number, a: any) => sum + (a.pointsAwarded || 0), 0);
+
+      console.log(`[Session] Retrieved ${answerReviewData.length} answers for participant ${participantId} in session ${sessionId}`);
+
+      res.status(200).json({
+        success: true,
+        answers: answerReviewData,
+        totalScore,
+        totalQuestions: quiz.questions.length,
+      });
+    } catch (error: any) {
+      console.error('[Session] Error retrieving answer history:', error);
+      res.status(500).json({
+        success: false,
+        error: 'Failed to retrieve answer history',
+        message: error.message || 'An unexpected error occurred',
+      });
+    }
+  }
+);
+
+/**
  * Generate CSV content from export data
- * Creates a multi-section CSV with session info, leaderboard, and detailed answers
+ * Creates a clean, human-readable multi-section CSV with:
+ * - Session info, statistics, questions summary
+ * - Final leaderboard ranked by score
+ * - Per-participant answer breakdown (every response for every participant)
+ * - Audit log with nicknames instead of IDs
+ * 
+ * All UUIDs are resolved to human-readable names (nicknames, option text, question text).
  */
 function generateCSV(
   exportData: any,
   quiz: Quiz,
   leaderboard: any[],
-  answers: any[]
+  answers: any[],
+  auditLogs?: any[]
 ): string {
   const lines: string[] = [];
 
   // Helper to escape CSV values
-  const escapeCSV = (value: any): string => {
+  const esc = (value: any): string => {
     if (value === null || value === undefined) return '';
     const str = String(value);
     if (str.includes(',') || str.includes('"') || str.includes('\n')) {
@@ -1462,21 +1740,50 @@ function generateCSV(
     return str;
   };
 
-  // Section 1: Session Information
+  // Build lookup maps so we never show raw UUIDs
+  const participantMap = new Map<string, string>(); // participantId -> nickname
+  for (const entry of leaderboard) {
+    participantMap.set(entry.participantId, entry.nickname);
+  }
+
+  const questionMap = new Map<string, { text: string; type: string; basePoints: number }>();
+  const optionMap = new Map<string, string>(); // optionId -> optionText
+  for (const q of quiz.questions) {
+    questionMap.set(q.questionId, {
+      text: q.questionText,
+      type: q.questionType,
+      basePoints: q.scoring.basePoints,
+    });
+    for (const o of q.options) {
+      optionMap.set(o.optionId, o.optionText);
+    }
+  }
+
+  const nick = (id: string) => participantMap.get(id) || id;
+  const qText = (id: string) => questionMap.get(id)?.text || id;
+  const oText = (id: string) => optionMap.get(id) || id;
+
+  // ── Section 1: Session Information ──
   lines.push('=== SESSION INFORMATION ===');
   lines.push('Field,Value');
-  lines.push(`Session ID,${escapeCSV(exportData.session.sessionId)}`);
-  lines.push(`Quiz Title,${escapeCSV(quiz.title)}`);
-  lines.push(`Quiz Type,${escapeCSV(quiz.quizType)}`);
-  lines.push(`Join Code,${escapeCSV(exportData.session.joinCode)}`);
-  lines.push(`State,${escapeCSV(exportData.session.state)}`);
-  lines.push(`Created At,${escapeCSV(exportData.session.createdAt)}`);
-  lines.push(`Started At,${escapeCSV(exportData.session.startedAt || 'N/A')}`);
-  lines.push(`Ended At,${escapeCSV(exportData.session.endedAt || 'N/A')}`);
-  lines.push(`Exported At,${escapeCSV(exportData.exportedAt)}`);
+  lines.push(`Quiz Title,${esc(quiz.title)}`);
+  lines.push(`Quiz Type,${esc(quiz.quizType)}`);
+  lines.push(`Join Code,${esc(exportData.session.joinCode)}`);
+  lines.push(`State,${esc(exportData.session.state)}`);
+  if (exportData.session.examMode) {
+    lines.push(`Exam Mode,Yes`);
+    const em = exportData.session.examMode;
+    if (em.negativeMarking) lines.push(`Negative Marking,${em.negativeMarkingPercentage || 25}%`);
+    if (em.skipRevealPhase) lines.push(`Skip Reveal Phase,Yes`);
+    if (em.autoAdvance) lines.push(`Auto Advance,Yes`);
+  }
+  lines.push(`Created At,${esc(exportData.session.createdAt)}`);
+  lines.push(`Started At,${esc(exportData.session.startedAt || 'N/A')}`);
+  lines.push(`Ended At,${esc(exportData.session.endedAt || 'N/A')}`);
+  lines.push(`Exported At,${esc(exportData.exportedAt)}`);
   lines.push('');
 
-  // Section 2: Statistics
+  // ── Section 2: Statistics ──
   lines.push('=== STATISTICS ===');
   lines.push('Metric,Value');
   lines.push(`Total Participants,${exportData.statistics.totalParticipants}`);
@@ -1487,61 +1794,250 @@ function generateCSV(
   lines.push(`Average Completion Time (ms),${exportData.statistics.averageCompletionTimeMs}`);
   lines.push('');
 
-  // Section 3: Leaderboard
-  lines.push('=== LEADERBOARD ===');
-  lines.push('Rank,Participant ID,Nickname,Total Score,Total Time (ms),Is Active,Is Eliminated,Joined At');
-  for (const entry of leaderboard) {
-    lines.push([
-      entry.rank,
-      escapeCSV(entry.participantId),
-      escapeCSV(entry.nickname),
-      entry.totalScore,
-      entry.totalTimeMs,
-      entry.isActive,
-      entry.isEliminated,
-      escapeCSV(entry.joinedAt),
-    ].join(','));
-  }
-  lines.push('');
-
-  // Section 4: Questions
+  // ── Section 3: Questions Summary ──
   lines.push('=== QUESTIONS ===');
-  lines.push('Question ID,Question Text,Question Type,Time Limit (s),Base Points,Correct Options');
-  for (const question of quiz.questions) {
+  lines.push('Q#,Question Text,Type,Time Limit (s),Base Points,Correct Answer(s)');
+  quiz.questions.forEach((question, idx) => {
     const correctOptions = question.options
       .filter((o) => o.isCorrect)
       .map((o) => o.optionText)
       .join('; ');
     lines.push([
-      escapeCSV(question.questionId),
-      escapeCSV(question.questionText),
-      escapeCSV(question.questionType),
+      idx + 1,
+      esc(question.questionText),
+      esc(question.questionType),
       question.timeLimit,
       question.scoring.basePoints,
-      escapeCSV(correctOptions),
+      esc(correctOptions),
+    ].join(','));
+  });
+  lines.push('');
+
+  // ── Section 4: Final Leaderboard ──
+  lines.push('=== FINAL LEADERBOARD ===');
+  lines.push('Rank,Nickname,Total Score,Total Time (ms),Questions Answered,Correct Answers,Accuracy %,Status');
+  // Group answers by participant for stats
+  const answersByParticipant = new Map<string, any[]>();
+  for (const a of answers) {
+    const list = answersByParticipant.get(a.participantId) || [];
+    list.push(a);
+    answersByParticipant.set(a.participantId, list);
+  }
+  for (const entry of leaderboard) {
+    const pAnswers = answersByParticipant.get(entry.participantId) || [];
+    const correctCount = pAnswers.filter((a: any) => a.isCorrect).length;
+    const accuracy = pAnswers.length > 0 ? Math.round((correctCount / pAnswers.length) * 100) : 0;
+    const status = entry.isEliminated ? 'Eliminated' : entry.isActive ? 'Active' : 'Inactive';
+    lines.push([
+      entry.rank,
+      esc(entry.nickname),
+      entry.totalScore,
+      entry.totalTimeMs,
+      pAnswers.length,
+      correctCount,
+      accuracy,
+      status,
     ].join(','));
   }
   lines.push('');
 
-  // Section 5: All Answers
-  lines.push('=== ANSWERS ===');
-  lines.push('Answer ID,Participant ID,Question ID,Selected Options,Is Correct,Points Awarded,Response Time (ms),Speed Bonus,Streak Bonus,Submitted At');
-  for (const answer of answers) {
-    lines.push([
-      escapeCSV(answer.answerId),
-      escapeCSV(answer.participantId),
-      escapeCSV(answer.questionId),
-      escapeCSV(answer.selectedOptions?.join('; ') || ''),
-      answer.isCorrect,
-      answer.pointsAwarded,
-      answer.responseTimeMs,
-      answer.speedBonusApplied,
-      answer.streakBonusApplied,
-      escapeCSV(answer.submittedAt),
-    ].join(','));
+  // ── Section 5: Per-Participant Answer Breakdown ──
+  // This is the main detailed section: one row per participant per question
+  lines.push('=== DETAILED ANSWERS ===');
+  lines.push('Nickname,Q#,Question Text,Answer Given,Correct Answer,Is Correct,Points Awarded,Response Time (ms),Speed Bonus,Streak Bonus,Negative Deduction');
+
+  // Build question index map
+  const questionIndexMap = new Map<string, number>();
+  quiz.questions.forEach((q, idx) => { questionIndexMap.set(q.questionId, idx + 1); });
+
+  // Build correct answers map
+  const correctAnswerMap = new Map<string, string>();
+  for (const q of quiz.questions) {
+    const correct = q.options.filter((o) => o.isCorrect).map((o) => o.optionText).join('; ');
+    correctAnswerMap.set(q.questionId, correct);
+  }
+
+  for (const entry of leaderboard) {
+    const pAnswers = answersByParticipant.get(entry.participantId) || [];
+    // Sort by question order
+    const sorted = [...pAnswers].sort((a, b) => {
+      return (questionIndexMap.get(a.questionId) || 0) - (questionIndexMap.get(b.questionId) || 0);
+    });
+    for (const answer of sorted) {
+      // Resolve selected options to text
+      let answerGiven = '';
+      if (answer.selectedOptions && answer.selectedOptions.length > 0) {
+        answerGiven = answer.selectedOptions.map((id: string) => oText(id)).join('; ');
+      } else if (answer.answerText !== undefined && answer.answerText !== null) {
+        answerGiven = String(answer.answerText);
+      } else if (answer.answerNumber !== undefined && answer.answerNumber !== null) {
+        answerGiven = String(answer.answerNumber);
+      }
+
+      const qIdx = questionIndexMap.get(answer.questionId) || '?';
+      const correctAnswer = correctAnswerMap.get(answer.questionId) || '';
+
+      lines.push([
+        esc(entry.nickname),
+        qIdx,
+        esc(qText(answer.questionId)),
+        esc(answerGiven),
+        esc(correctAnswer),
+        answer.isCorrect ? 'Yes' : 'No',
+        answer.pointsAwarded ?? 0,
+        answer.responseTimeMs ?? 0,
+        answer.speedBonusApplied ?? 0,
+        answer.streakBonusApplied ?? 0,
+        answer.negativeDeductionApplied ?? 0,
+      ].join(','));
+    }
+  }
+  lines.push('');
+
+  // ── Section 6: Audit Logs ──
+  if (auditLogs && auditLogs.length > 0) {
+    lines.push('=== AUDIT LOGS ===');
+    lines.push('Timestamp,Event,Participant,Details');
+    for (const log of auditLogs) {
+      // Format event type to be readable
+      const eventType = String(log.eventType || '').replace(/_/g, ' ');
+      const participant = log.participantId ? nick(log.participantId) : '';
+
+      // Extract meaningful details
+      let details = '';
+      if (log.details) {
+        const d = log.details;
+        const parts: string[] = [];
+        if (d.reason) parts.push(`Reason: ${d.reason}`);
+        if (d.currentState) parts.push(`State: ${d.currentState}`);
+        if (d.totalScore !== undefined) parts.push(`Score: ${d.totalScore}`);
+        if (d.rank !== undefined) parts.push(`Rank: ${d.rank}`);
+        if (d.durationMs !== undefined) parts.push(`Duration: ${d.durationMs}ms`);
+        if (d.totalFocusLostCount !== undefined) parts.push(`Focus lost count: ${d.totalFocusLostCount}`);
+        if (d.totalFocusLostTimeMs !== undefined) parts.push(`Total focus lost: ${d.totalFocusLostTimeMs}ms`);
+        details = parts.length > 0 ? parts.join('; ') : JSON.stringify(d);
+      }
+
+      lines.push([
+        esc(log.timestamp),
+        esc(eventType),
+        esc(participant),
+        esc(details),
+      ].join(','));
+    }
   }
 
   return lines.join('\n');
 }
+
+/**
+ * DELETE /api/sessions/:sessionId
+ * 
+ * Delete a quiz session and all related data
+ * 
+ * Only allows deletion of sessions in ENDED state to prevent
+ * accidental deletion of active sessions.
+ * 
+ * Response:
+ * - 200: Session deleted successfully
+ *   {
+ *     success: true,
+ *     message: 'Session deleted successfully',
+ *     deletedCounts: {
+ *       participants: number,
+ *       answers: number
+ *     }
+ *   }
+ * - 400: Session is not in ENDED state
+ * - 404: Session not found
+ * - 500: Server error
+ * 
+ * Requirements: 6.5, 6.6
+ */
+router.delete('/:sessionId', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { sessionId } = req.params;
+
+    // Get session from MongoDB
+    const sessionsCollection = mongodbService.getCollection<Session>('sessions');
+    const session = await mongodbService.withRetry(async () => {
+      return await sessionsCollection.findOne({ sessionId });
+    });
+
+    if (!session) {
+      res.status(404).json({
+        success: false,
+        error: 'Session not found',
+        message: `No session found with ID: ${sessionId}`,
+      });
+      return;
+    }
+
+    // Verify session is in ENDED state
+    if (session.state !== 'ENDED') {
+      res.status(400).json({
+        success: false,
+        error: 'Cannot delete active session',
+        message: 'Only ended sessions can be deleted. Please end the session first.',
+      });
+      return;
+    }
+
+    // Delete all participants for this session
+    const participantsCollection = mongodbService.getCollection('participants');
+    const participantsResult = await mongodbService.withRetry(async () => {
+      return await participantsCollection.deleteMany({ sessionId });
+    });
+
+    console.log(`[Session] Deleted ${participantsResult.deletedCount} participants for session ${sessionId}`);
+
+    // Delete all answers for this session
+    const answersCollection = mongodbService.getCollection('answers');
+    const answersResult = await mongodbService.withRetry(async () => {
+      return await answersCollection.deleteMany({ sessionId });
+    });
+
+    console.log(`[Session] Deleted ${answersResult.deletedCount} answers for session ${sessionId}`);
+
+    // Delete the session document
+    await mongodbService.withRetry(async () => {
+      await sessionsCollection.deleteOne({ sessionId });
+    });
+
+    console.log(`[Session] Deleted session ${sessionId}`);
+
+    // Clean up Redis data
+    try {
+      // Remove session state from Redis
+      await redisDataStructuresService.deleteSessionState(sessionId);
+      
+      // Remove join code mapping if it exists
+      if (session.joinCode) {
+        await redisDataStructuresService.deleteJoinCodeMapping(session.joinCode);
+      }
+      
+      console.log(`[Session] Cleaned up Redis data for session ${sessionId}`);
+    } catch (redisError) {
+      // Log but don't fail if Redis cleanup fails
+      console.warn(`[Session] Failed to clean up Redis data for session ${sessionId}:`, redisError);
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Session deleted successfully',
+      deletedCounts: {
+        participants: participantsResult.deletedCount,
+        answers: answersResult.deletedCount,
+      },
+    });
+  } catch (error: any) {
+    console.error('[Session] Error deleting session:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to delete session',
+      message: error.message || 'An unexpected error occurred',
+    });
+  }
+});
 
 export default router;

@@ -48,6 +48,26 @@ export const colorSchema = z
  */
 export const urlSchema = z.string().url('Invalid URL format');
 
+/**
+ * Image URL validation schema - allows both full URLs and relative paths (e.g., /uploads/...)
+ */
+export const imageUrlSchema = z.string().refine(
+  (val) => {
+    // Allow relative paths starting with /
+    if (val.startsWith('/')) {
+      return true;
+    }
+    // Allow full URLs
+    try {
+      new URL(val);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  { message: 'Must be a valid URL or relative path starting with /' }
+);
+
 // ============================================================================
 // Quiz Type Schemas
 // ============================================================================
@@ -63,10 +83,10 @@ export const quizTypeSchema = z.enum(['REGULAR', 'ELIMINATION', 'FFI'], {
  * Question type enum
  */
 export const questionTypeSchema = z.enum(
-  ['MULTIPLE_CHOICE', 'TRUE_FALSE', 'SCALE_1_10', 'NUMBER_INPUT', 'OPEN_ENDED'],
+  ['MULTIPLE_CHOICE', 'MULTI_SELECT', 'TRUE_FALSE', 'SCALE_1_10', 'NUMBER_INPUT', 'OPEN_ENDED'],
   {
     errorMap: () => ({
-      message: 'Question type must be MULTIPLE_CHOICE, TRUE_FALSE, SCALE_1_10, NUMBER_INPUT, or OPEN_ENDED',
+      message: 'Question type must be MULTIPLE_CHOICE, MULTI_SELECT, TRUE_FALSE, SCALE_1_10, NUMBER_INPUT, or OPEN_ENDED',
     }),
   }
 );
@@ -157,7 +177,7 @@ export const scoringSchema = z.object({
   speedBonusMultiplier: z
     .number()
     .min(0, 'Speed bonus multiplier must be non-negative')
-    .max(1, 'Speed bonus multiplier must be at most 1'),
+    .max(2, 'Speed bonus multiplier must be at most 2'),
   partialCreditEnabled: z.boolean(),
 });
 
@@ -167,11 +187,12 @@ export const scoringSchema = z.object({
 
 /**
  * Answer option schema for creation (IDs optional)
+ * Note: optionText can be empty for NUMBER_INPUT questions where the correct answer is stored as a number string
  */
 export const optionCreateSchema = z.object({
   optionId: uuidSchema.optional(),
-  optionText: z.string().min(1, 'Option text is required').max(500, 'Option text must be at most 500 characters'),
-  optionImageUrl: urlSchema.optional(),
+  optionText: z.string().max(500, 'Option text must be at most 500 characters'),
+  optionImageUrl: imageUrlSchema.optional(),
   isCorrect: z.boolean(),
 });
 
@@ -186,7 +207,7 @@ export const questionCreateSchema = z
       .min(1, 'Question text is required')
       .max(1000, 'Question text must be at most 1000 characters'),
     questionType: questionTypeSchema,
-    questionImageUrl: urlSchema.optional(),
+    questionImageUrl: imageUrlSchema.optional(),
     timeLimit: z
       .number()
       .int()
@@ -226,7 +247,7 @@ export const questionCreateSchema = z
   )
   .refine(
     (data) => {
-      // Must have at least one correct option (except for OPEN_ENDED)
+      // Must have at least one correct option (except for OPEN_ENDED and NUMBER_INPUT)
       if (data.questionType !== 'OPEN_ENDED' && data.questionType !== 'NUMBER_INPUT') {
         return data.options.some((opt) => opt.isCorrect);
       }
@@ -236,15 +257,29 @@ export const questionCreateSchema = z
       message: 'At least one option must be marked as correct',
       path: ['options'],
     }
+  )
+  .refine(
+    (data) => {
+      // Options must have text for most question types (except NUMBER_INPUT and OPEN_ENDED)
+      if (data.questionType !== 'NUMBER_INPUT' && data.questionType !== 'OPEN_ENDED') {
+        return data.options.every((opt) => opt.optionText.trim().length > 0);
+      }
+      return true;
+    },
+    {
+      message: 'All options must have text',
+      path: ['options'],
+    }
   );
 
 /**
  * Answer option schema
+ * Note: optionText validation is relaxed here; question-level validation ensures text is present where needed
  */
 export const optionSchema = z.object({
   optionId: uuidSchema,
-  optionText: z.string().min(1, 'Option text is required').max(500, 'Option text must be at most 500 characters'),
-  optionImageUrl: urlSchema.optional(),
+  optionText: z.string().max(500, 'Option text must be at most 500 characters'),
+  optionImageUrl: imageUrlSchema.optional(),
   isCorrect: z.boolean(),
 });
 
@@ -263,7 +298,7 @@ export const questionSchema = z
       .min(1, 'Question text is required')
       .max(1000, 'Question text must be at most 1000 characters'),
     questionType: questionTypeSchema,
-    questionImageUrl: urlSchema.optional(),
+    questionImageUrl: imageUrlSchema.optional(),
     timeLimit: z
       .number()
       .int()
@@ -303,7 +338,7 @@ export const questionSchema = z
   )
   .refine(
     (data) => {
-      // Must have at least one correct option (except for OPEN_ENDED)
+      // Must have at least one correct option (except for OPEN_ENDED and NUMBER_INPUT)
       if (data.questionType !== 'OPEN_ENDED' && data.questionType !== 'NUMBER_INPUT') {
         return data.options.some((opt) => opt.isCorrect);
       }
@@ -311,6 +346,19 @@ export const questionSchema = z
     },
     {
       message: 'At least one option must be marked as correct',
+      path: ['options'],
+    }
+  )
+  .refine(
+    (data) => {
+      // Options must have text for most question types (except NUMBER_INPUT and OPEN_ENDED)
+      if (data.questionType !== 'NUMBER_INPUT' && data.questionType !== 'OPEN_ENDED') {
+        return data.options.every((opt) => opt.optionText.trim().length > 0);
+      }
+      return true;
+    },
+    {
+      message: 'All options must have text',
       path: ['options'],
     }
   );
@@ -464,6 +512,13 @@ export const createQuizRequestSchema = z
     branding: brandingSchema,
     eliminationSettings: eliminationSettingsSchema.optional(),
     ffiSettings: ffiSettingsSchema.optional(),
+    examSettings: z.object({
+      negativeMarkingEnabled: z.boolean(),
+      negativeMarkingPercentage: z.number().min(0).max(100),
+      focusMonitoringEnabled: z.boolean(),
+      skipRevealPhase: z.boolean().optional(),
+      autoAdvance: z.boolean().optional(),
+    }).optional(),
     questions: z.array(questionCreateSchema).optional(), // Questions are optional during creation
   })
   .refine(
@@ -502,6 +557,13 @@ export const updateQuizRequestSchema = z
     branding: brandingSchema,
     eliminationSettings: eliminationSettingsSchema.optional(),
     ffiSettings: ffiSettingsSchema.optional(),
+    examSettings: z.object({
+      negativeMarkingEnabled: z.boolean(),
+      negativeMarkingPercentage: z.number().min(0).max(100),
+      focusMonitoringEnabled: z.boolean(),
+      skipRevealPhase: z.boolean().optional(),
+      autoAdvance: z.boolean().optional(),
+    }).optional(),
     questions: z.array(questionCreateSchema).min(1, 'At least one question is required'),
   })
   .partial();
@@ -516,7 +578,7 @@ export const createQuestionRequestSchema = z
       .min(1, 'Question text is required')
       .max(1000, 'Question text must be at most 1000 characters'),
     questionType: questionTypeSchema,
-    questionImageUrl: urlSchema.optional(),
+    questionImageUrl: imageUrlSchema.optional(),
     timeLimit: z
       .number()
       .int()
@@ -579,7 +641,7 @@ export const updateQuestionRequestSchema = z
       .min(1, 'Question text is required')
       .max(1000, 'Question text must be at most 1000 characters'),
     questionType: questionTypeSchema,
-    questionImageUrl: urlSchema.optional(),
+    questionImageUrl: imageUrlSchema.optional(),
     timeLimit: z
       .number()
       .int()
@@ -745,14 +807,17 @@ export function formatValidationErrors(error: z.ZodError): Record<string, string
  */
 export function validateRequest<T>(schema: z.ZodSchema<T>) {
   return (req: any, res: any, next: any) => {
+    console.warn('[Validation] Validating request body:', JSON.stringify(req.body, null, 2));
     const result = validate(schema, req.body);
     if (!result.success) {
       const failedResult = result as { success: false; errors: z.ZodError };
+      console.error('[Validation] FAILED - Errors:', JSON.stringify(failedResult.errors.issues, null, 2));
       return res.status(400).json({
         error: 'Validation failed',
         details: formatValidationErrors(failedResult.errors),
       });
     }
+    console.warn('[Validation] SUCCESS');
     req.validatedBody = result.data;
     next();
   };
@@ -767,17 +832,23 @@ export function validateAndSanitizeRequest<T>(schema: z.ZodSchema<T>) {
   const { inputSanitizationService } = require('../services/input-sanitization.service');
   
   return (req: any, res: any, next: any) => {
+    console.warn('[Validation] Raw request body:', JSON.stringify(req.body, null, 2));
+    
     // Sanitize the request body before validation
     const sanitizedBody = sanitizeRequestBody(req.body, inputSanitizationService);
+    
+    console.warn('[Validation] Sanitized body:', JSON.stringify(sanitizedBody, null, 2));
     
     const result = validate(schema, sanitizedBody);
     if (!result.success) {
       const failedResult = result as { success: false; errors: z.ZodError };
+      console.error('[Validation] FAILED - Errors:', JSON.stringify(failedResult.errors.issues, null, 2));
       return res.status(400).json({
         error: 'Validation failed',
         details: formatValidationErrors(failedResult.errors),
       });
     }
+    console.warn('[Validation] SUCCESS');
     req.validatedBody = result.data;
     next();
   };
@@ -829,6 +900,13 @@ function sanitizeRequestBody(body: any, sanitizer: any): any {
           case 'answerText':
             sanitized[key] = sanitizer.sanitizeAnswerText(value);
             break;
+          // URL fields should NOT be sanitized - they need slashes and special chars
+          case 'questionImageUrl':
+          case 'optionImageUrl':
+          case 'logoUrl':
+          case 'backgroundImageUrl':
+            sanitized[key] = value;
+            break;
           default:
             // For other string fields, apply general sanitization
             sanitized[key] = sanitizer.sanitize(value);
@@ -842,3 +920,82 @@ function sanitizeRequestBody(body: any, sanitizer: any): any {
 
   return body;
 }
+
+
+// ============================================================================
+// Tournament Validation Schemas
+// ============================================================================
+
+/**
+ * Tournament state enum
+ */
+export const tournamentStateSchema = z.enum(['DRAFT', 'LOBBY', 'IN_PROGRESS', 'COMPLETED'], {
+  errorMap: () => ({ message: 'Tournament state must be DRAFT, LOBBY, IN_PROGRESS, or COMPLETED' }),
+});
+
+/**
+ * Progression type enum
+ */
+export const progressionTypeSchema = z.enum(['TOP_N', 'TOP_PERCENTAGE'], {
+  errorMap: () => ({ message: 'Progression type must be TOP_N or TOP_PERCENTAGE' }),
+});
+
+/**
+ * Progression rules schema
+ */
+export const progressionRulesSchema = z.object({
+  type: progressionTypeSchema,
+  value: z.number().int().min(1, 'Progression value must be at least 1'),
+  scoreCarryOver: z.boolean(),
+}).refine(
+  (data) => {
+    // For TOP_PERCENTAGE, value must be between 1 and 100
+    if (data.type === 'TOP_PERCENTAGE') {
+      return data.value >= 1 && data.value <= 100;
+    }
+    return true;
+  },
+  {
+    message: 'TOP_PERCENTAGE value must be between 1 and 100',
+    path: ['value'],
+  }
+);
+
+/**
+ * Tournament round schema
+ */
+export const tournamentRoundSchema = z.object({
+  roundNumber: z.number().int().min(1, 'Round number must be at least 1'),
+  quizId: objectIdSchema,
+  sessionId: uuidSchema.optional(),
+  qualifiedParticipants: z.array(uuidSchema),
+  state: z.enum(['PENDING', 'ACTIVE', 'COMPLETED']),
+  startedAt: z.date().optional(),
+  endedAt: z.date().optional(),
+});
+
+/**
+ * Create tournament request schema
+ */
+export const createTournamentRequestSchema = z.object({
+  title: z.string().min(1, 'Title is required').max(200, 'Title must be at most 200 characters'),
+  description: z.string().max(1000, 'Description must be at most 1000 characters'),
+  branding: brandingSchema.optional(),
+  progressionRules: progressionRulesSchema,
+});
+
+/**
+ * Add round to tournament request schema
+ */
+export const addTournamentRoundRequestSchema = z.object({
+  quizId: objectIdSchema,
+});
+
+/**
+ * Quiz exam settings schema
+ */
+export const quizExamSettingsSchema = z.object({
+  negativeMarkingEnabled: z.boolean(),
+  negativeMarkingPercentage: z.number().min(5).max(100),
+  focusMonitoringEnabled: z.boolean(),
+});

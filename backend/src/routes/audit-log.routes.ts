@@ -10,6 +10,8 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { auditLogService, ExtendedAuditEventType } from '../services/audit-log.service';
+import { mongodbService } from '../services/mongodb.service';
+import { Session } from '../models/types';
 
 const router = Router();
 
@@ -139,7 +141,25 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    const { sessionId, eventType, startTime, endTime, page, limit } = parseResult.data;
+    const { sessionId: rawSessionId, eventType, startTime, endTime, page, limit } = parseResult.data;
+
+    // Resolve session filter — accept either a join code or a UUID
+    let sessionId = rawSessionId;
+    if (rawSessionId && rawSessionId.length <= 10) {
+      // Looks like a join code, try to resolve it to a session UUID
+      try {
+        const sessionsCollection = mongodbService.getCollection<Session>('sessions');
+        const session = await sessionsCollection.findOne(
+          { joinCode: rawSessionId.toUpperCase() },
+          { projection: { sessionId: 1 } }
+        );
+        if (session) {
+          sessionId = session.sessionId;
+        }
+      } catch (_err) {
+        // Fall through with original value
+      }
+    }
 
     // Calculate skip for pagination
     const skip = (page - 1) * limit;
@@ -184,6 +204,26 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 
     console.log(`[AuditLog] Retrieved ${logs.length} audit logs (total: ${total})`);
 
+    // Enrich session IDs with human-readable join codes
+    const uniqueSessionIds = [...new Set(logs.map((l) => l.sessionId).filter(Boolean))] as string[];
+    const joinCodeMap: Record<string, string> = {};
+    if (uniqueSessionIds.length > 0) {
+      try {
+        const sessionsCollection = mongodbService.getCollection<Session>('sessions');
+        const sessions = await sessionsCollection
+          .find(
+            { sessionId: { $in: uniqueSessionIds } },
+            { projection: { sessionId: 1, joinCode: 1 } }
+          )
+          .toArray();
+        for (const s of sessions) {
+          joinCodeMap[s.sessionId] = s.joinCode;
+        }
+      } catch (_err) {
+        // Non-critical — just show raw IDs if lookup fails
+      }
+    }
+
     // Return paginated results
     res.status(200).json({
       success: true,
@@ -192,6 +232,7 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
           _id: log._id?.toString(),
           eventType: log.eventType,
           sessionId: log.sessionId,
+          joinCode: log.sessionId ? joinCodeMap[log.sessionId] || null : null,
           participantId: log.participantId,
           quizId: log.quizId,
           userId: log.userId,

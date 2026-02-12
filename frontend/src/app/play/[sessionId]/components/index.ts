@@ -3,7 +3,7 @@
  * 
  * Exports all components used in the participant play interface.
  * 
- * Requirements: 14.2, 14.3, 14.4, 14.5, 14.6, 14.7, 3.6
+ * Requirements: 14.2, 14.3, 14.4, 14.5, 14.6, 14.7, 3.6, 8.1, 8.2, 8.3, 8.4, 8.5
  */
 
 export { LobbyScreen } from './lobby-screen';
@@ -27,3 +27,10 @@ export type {
   OfflineIndicatorProps, 
   OfflineIndicatorCompactProps 
 } from './offline-indicator';
+
+export { AnswerReview } from './AnswerReview';
+export type { 
+  AnswerReviewProps, 
+  AnswerReviewQuestion, 
+  AnswerReviewOption 
+} from './AnswerReview';

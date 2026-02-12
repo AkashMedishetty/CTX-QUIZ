@@ -57,6 +57,13 @@ interface CreateQuizRequest {
   ffiSettings?: {
     winnersPerQuestion: number;
   };
+  examSettings?: {
+    negativeMarkingEnabled: boolean;
+    negativeMarkingPercentage: number;
+    focusMonitoringEnabled: boolean;
+    skipRevealPhase?: boolean;
+    autoAdvance?: boolean;
+  };
 }
 
 /**
@@ -242,6 +249,10 @@ export default function CreateQuizPage() {
       requestData.ffiSettings = {
         winnersPerQuestion: formData.ffiWinnerCount,
       };
+    }
+
+    if (formData.examSettings) {
+      requestData.examSettings = formData.examSettings;
     }
 
     await createMutation.mutateAsync(requestData);

@@ -22,6 +22,7 @@ import {
   ParticipantInfo,
   QuestionData,
 } from '@/lib/socket-client';
+import { preloadImages } from '@/lib/utils';
 
 /**
  * Big Screen connection state
@@ -337,6 +338,15 @@ export function useBigScreenSocket(
     socket.on('question_started', (data) => {
       const remainingSeconds = Math.ceil((data.endTime - Date.now()) / 1000);
       
+      // Preload question and option images for faster display
+      const imagesToPreload: (string | undefined)[] = [
+        data.question.questionImageUrl,
+        ...data.question.options.map((opt: { optionImageUrl?: string }) => opt.optionImageUrl),
+      ];
+      preloadImages(imagesToPreload).catch(() => {
+        // Ignore preload errors - images will load normally
+      });
+      
       setSessionState((prev) => ({
         ...prev!,
         state: 'ACTIVE_QUESTION',
@@ -380,6 +390,51 @@ export function useBigScreenSocket(
         remainingSeconds: 0,
       }));
       callbacksRef.current.onRevealAnswers?.(data.correctOptions, stats);
+    });
+
+    // Question skipped event - handles when controller skips a question
+    // In exam mode with skipRevealPhase, this will be followed by question_started
+    // In normal mode, this transitions to REVEAL state
+    socket.on('question_skipped', (data: {
+      questionId: string;
+      questionIndex: number;
+      reason: string;
+      timestamp: number;
+      examModeSkipReveal?: boolean;
+    }) => {
+      console.log('[BigScreen] Question skipped:', data);
+      
+      // If exam mode skip reveal is enabled, the next question_started event
+      // will handle the transition. Otherwise, we stay in current state
+      // and wait for reveal_answers or next question_started
+      if (!data.examModeSkipReveal) {
+        // Normal mode: transition to REVEAL state (reveal_answers will follow)
+        setSessionState((prev) => ({
+          ...prev!,
+          remainingSeconds: 0,
+        }));
+      }
+      // In exam mode, question_started will follow immediately
+    });
+
+    // Timer expired event - handles when timer expires in exam mode
+    // This is a notification that time is up before transitioning to next question
+    socket.on('timer_expired', (data: {
+      questionId: string;
+      questionIndex: number;
+      examModeSkipReveal?: boolean;
+      timestamp: number;
+    }) => {
+      console.log('[BigScreen] Timer expired:', data);
+      
+      // Set remaining seconds to 0 to show time's up
+      setSessionState((prev) => ({
+        ...prev!,
+        remainingSeconds: 0,
+      }));
+      
+      // In exam mode, question_started or quiz_ended will follow immediately
+      // In normal mode, reveal_answers will follow
     });
 
     // Leaderboard update event

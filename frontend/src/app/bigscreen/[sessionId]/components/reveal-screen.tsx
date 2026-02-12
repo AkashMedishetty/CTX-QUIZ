@@ -20,9 +20,10 @@
 
 'use client';
 
-import { useMemo } from 'react';
+import React, { useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Image from 'next/image';
+import { getImageUrl } from '@/lib/utils';
 
 /**
  * Question option interface
@@ -238,7 +239,7 @@ export function RevealScreen({
               <div className="neu-pressed rounded-lg md:rounded-xl p-2 md:p-3 lg:p-4 max-w-lg lg:max-w-xl xl:max-w-2xl w-full">
                 <div className="relative w-full aspect-video">
                   <Image
-                    src={question.questionImageUrl!}
+                    src={getImageUrl(question.questionImageUrl!) || ''}
                     alt="Question image"
                     fill
                     className="object-contain rounded-md lg:rounded-lg"
@@ -453,6 +454,12 @@ function RevealOptionCard({
   // Animation delay based on index
   const baseDelay = 0.4 + index * 0.1;
   const revealDelay = baseDelay + 0.3;
+  
+  // State for image loading error
+  const [imageError, setImageError] = React.useState(false);
+  
+  // Get the full image URL using the utility
+  const optionImageSrc = hasImage ? getImageUrl(option.optionImageUrl) : undefined;
 
   return (
     <motion.div
@@ -570,7 +577,7 @@ function RevealOptionCard({
       </div>
 
       {/* Option Image - Responsive sizing */}
-      {hasImage && (
+      {hasImage && !imageError && optionImageSrc && (
         <div className={`
           mt-2 md:mt-3 lg:mt-4 flex-1
           ${isCorrect ? '' : 'opacity-50'}
@@ -578,12 +585,42 @@ function RevealOptionCard({
           <div className="neu-pressed rounded-md md:rounded-lg p-1.5 md:p-2 h-full">
             <div className="relative w-full aspect-video">
               <Image
-                src={option.optionImageUrl!}
+                src={optionImageSrc}
                 alt={`Option ${label} image`}
                 fill
                 className="object-contain rounded-sm md:rounded-md"
                 sizes="(max-width: 768px) 100vw, (max-width: 1280px) 50vw, 33vw"
+                onError={() => setImageError(true)}
               />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Image Error Fallback Placeholder */}
+      {hasImage && (imageError || !optionImageSrc) && (
+        <div className={`
+          mt-2 md:mt-3 lg:mt-4 flex-1
+          ${isCorrect ? '' : 'opacity-50'}
+        `}>
+          <div className="neu-pressed rounded-md md:rounded-lg p-1.5 md:p-2 h-full">
+            <div className="relative w-full aspect-video flex items-center justify-center bg-[var(--neu-bg)]">
+              <div className="flex flex-col items-center gap-2 text-[var(--text-muted)]">
+                <svg
+                  className="w-8 h-8 md:w-10 md:h-10 lg:w-12 lg:h-12"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={1.5}
+                    d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
+                  />
+                </svg>
+                <span className="text-xs md:text-sm">Image unavailable</span>
+              </div>
             </div>
           </div>
         </div>
