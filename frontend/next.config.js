@@ -4,6 +4,10 @@ const nextConfig = {
   swcMinify: true,
   // Enable standalone output for Docker deployment
   output: 'standalone',
+  // Skip ESLint during Docker builds (root .eslintrc.json not available in container)
+  eslint: {
+    ignoreDuringBuilds: true,
+  },
   images: {
     remotePatterns: [
       {
@@ -12,7 +16,11 @@ const nextConfig = {
       },
       {
         protocol: 'https',
-        hostname: 'vm701294211.manageserver.in',
+        hostname: 'quiz.ctx.works',
+      },
+      {
+        protocol: 'https',
+        hostname: '103.194.228.51',
       },
     ],
     formats: ['image/avif', 'image/webp'],
