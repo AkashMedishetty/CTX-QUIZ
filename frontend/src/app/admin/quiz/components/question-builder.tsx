@@ -175,6 +175,10 @@ const defaultValues: QuestionFormData = {
     speedBonusEnabled: true,
     speedBonusMultiplier: 0.5,
     partialCreditEnabled: false,
+    negativeMarkingOverride: {
+      enabled: false,
+      percentage: 25,
+    },
   },
   speakerNotes: '',
   explanationText: '',
@@ -947,6 +951,25 @@ export function QuestionBuilder({
         </div>
       </FormSection>
 
+
+      {/* Validation Error Summary */}
+      {Object.keys(errors).length > 0 && (
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="p-4 rounded-lg bg-error/10 border border-error/20"
+        >
+          <p className="text-body-sm font-medium text-error mb-2">Please fix the following errors:</p>
+          <ul className="list-disc list-inside text-body-sm text-error space-y-1">
+            {errors.questionText && <li>{errors.questionText.message || 'Question text is required'}</li>}
+            {errors.options && (
+              <li>{(errors.options as any)?.message || (errors.options as any)?.root?.message || 'Check your answer options'}</li>
+            )}
+            {errors.timeLimit && <li>{errors.timeLimit.message}</li>}
+            {errors.scoring && <li>Check scoring configuration</li>}
+          </ul>
+        </motion.div>
+      )}
 
       {/* Form Actions */}
       <motion.div

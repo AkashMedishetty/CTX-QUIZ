@@ -523,7 +523,7 @@ export const answerSchema = z.object({
 export const createQuizRequestSchema = z
   .object({
     title: z.string().min(1, 'Title is required').max(200, 'Title must be at most 200 characters'),
-    description: z.string().max(1000, 'Description must be at most 1000 characters'),
+    description: z.string().max(1000, 'Description must be at most 1000 characters').optional().default(''),
     quizType: quizTypeSchema,
     branding: brandingSchema,
     eliminationSettings: eliminationSettingsSchema.optional(),
