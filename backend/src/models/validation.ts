@@ -45,8 +45,24 @@ export const colorSchema = z
 
 /**
  * URL validation schema
+ * Accepts both full URLs and relative paths starting with /uploads/
  */
-export const urlSchema = z.string().url('Invalid URL format');
+export const urlSchema = z.string().refine(
+  (val) => {
+    // Allow relative paths starting with /uploads/
+    if (val.startsWith('/uploads/')) {
+      return true;
+    }
+    // Otherwise validate as full URL
+    try {
+      new URL(val);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  { message: 'Invalid URL format' }
+);
 
 /**
  * Image URL validation schema - allows both full URLs and relative paths (e.g., /uploads/...)
@@ -871,10 +887,15 @@ function sanitizeRequestBody(body: any, sanitizer: any): any {
   }
 
   if (typeof body === 'object') {
+    // URL fields should NOT be sanitized - sanitization encodes slashes which breaks URL validation
+    const URL_FIELDS = new Set(['questionImageUrl', 'optionImageUrl', 'logoUrl', 'backgroundImageUrl']);
+    
     const sanitized: any = {};
     for (const [key, value] of Object.entries(body)) {
-      // Apply specific sanitization based on field name
-      if (typeof value === 'string') {
+      // Skip sanitization for URL fields - they are validated by urlSchema instead
+      if (URL_FIELDS.has(key)) {
+        sanitized[key] = value;
+      } else if (typeof value === 'string') {
         switch (key) {
           case 'title':
             sanitized[key] = sanitizer.sanitizeQuizTitle(value);

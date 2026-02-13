@@ -104,8 +104,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
-            NEXT_PUBLIC_API_URL=https://quiz.ctx.works/api
-            NEXT_PUBLIC_WS_URL=wss://quiz.ctx.works
+            NEXT_PUBLIC_API_URL=https://${{ env.DOMAIN }}/api
+            NEXT_PUBLIC_WS_URL=wss://${{ env.DOMAIN }}
 
   # ===========================================================================
   # Deploy to VPS
@@ -159,8 +159,8 @@ jobs:
           
           echo "🏗️ Building frontend image..."
           docker build \
-            --build-arg NEXT_PUBLIC_API_URL=https://quiz.ctx.works/api \
-            --build-arg NEXT_PUBLIC_WS_URL=wss://quiz.ctx.works \
+            --build-arg NEXT_PUBLIC_API_URL=https://${{ env.DOMAIN }}/api \
+            --build-arg NEXT_PUBLIC_WS_URL=wss://${{ env.DOMAIN }} \
             -t ctx-quiz-frontend:latest ./frontend
           
           # Save and compress images
