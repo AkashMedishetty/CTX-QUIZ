@@ -966,7 +966,7 @@ export function QuestionScreen({
   );
 
   return (
-    <main className="min-h-screen-mobile flex flex-col bg-[var(--neu-bg)] overscroll-none">
+    <main className="h-[100dvh] flex flex-col bg-[var(--neu-bg)] overflow-hidden">
       {/* Connection indicator */}
       <ConnectionIndicator isConnected={isConnected} />
 
