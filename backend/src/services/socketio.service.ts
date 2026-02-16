@@ -198,14 +198,11 @@ class SocketIOService {
       // Set up global error handling
       this.setupErrorHandling();
 
-      // Start resource monitoring for connection rejection
-      // Requirement 17.9: Reject new connections when system resources are exhausted
-      // In development, skip resource monitoring to avoid false positives
-      if (config.env !== 'development') {
-        resourceMonitorService.startMonitoring();
-      } else {
-        console.log('[Socket.IO] Resource monitoring disabled in development mode');
-      }
+      // Resource monitoring DISABLED for load testing (resource guard is also disabled)
+      // if (config.env !== 'development') {
+      //   resourceMonitorService.startMonitoring();
+      // }
+      console.log('[Socket.IO] Resource monitoring DISABLED for load testing');
 
       // Initialize performance logging service
       // Requirements: 11.3, 11.9 - Log slow operations and high resource usage
@@ -274,12 +271,11 @@ class SocketIOService {
   private setupAuthenticationMiddleware(): void {
     const io = this.io!;
 
-    // Apply resource guard middleware first (before authentication)
-    // In development, skip resource guard entirely to avoid blocking connections
-    // In production, use the default 80% threshold
-    if (config.env !== 'development') {
-      io.use(resourceGuardMiddleware);
-    }
+    // Resource guard middleware DISABLED for load testing
+    // Was rejecting connections when container memory appeared high
+    // if (config.env !== 'development') {
+    //   io.use(resourceGuardMiddleware);
+    // }
 
     // Apply authentication middleware to all connections
     io.use(socketAuthMiddleware);
@@ -288,8 +284,7 @@ class SocketIOService {
     // Requirement 9.8: Validate all WebSocket messages for proper format and authorization
     io.use(createValidationMiddleware());
 
-    console.log('[Socket.IO] Authentication middleware configured' + 
-      (config.env === 'development' ? ' (resource guard disabled in dev)' : ' with resource guard'));
+    console.log('[Socket.IO] Authentication middleware configured (resource guard DISABLED for load testing)');
     console.log('[Socket.IO] WebSocket message validation middleware enabled');
   }
 

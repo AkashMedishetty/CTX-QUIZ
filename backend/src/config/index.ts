@@ -119,7 +119,8 @@ export const config = {
     // connectionStateRecoveryDuration: How long to keep connection state for recovery (2 minutes)
     // Allows participants to recover their session after temporary disconnections
     // Requirements: 11.1, 11.2
-    connectionStateRecoveryDuration: parseInt(process.env.WEBSOCKET_CONNECTION_STATE_RECOVERY_DURATION || String(2 * 60 * 1000), 10),
+    // Reduced from 2min to 30s to lower memory usage on constrained VPS
+    connectionStateRecoveryDuration: parseInt(process.env.WEBSOCKET_CONNECTION_STATE_RECOVERY_DURATION || String(30 * 1000), 10),
   },
   
   monitoring: {

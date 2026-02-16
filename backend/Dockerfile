@@ -76,5 +76,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 # Use dumb-init as PID 1 for proper signal handling
 ENTRYPOINT ["dumb-init", "--"]
 
-# Start the application
-CMD ["node", "dist/index.js"]
+# Start the application with constrained heap for container environment
+# --max-old-space-size=480 keeps Node heap within Docker 640MB limit
+# --optimize-for-size reduces memory footprint at slight CPU cost
+CMD ["node", "--max-old-space-size=480", "--optimize-for-size", "dist/index.js"]

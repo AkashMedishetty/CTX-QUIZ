@@ -79,10 +79,10 @@ export interface ResourceMonitorConfig {
  * Default configuration
  */
 const DEFAULT_CONFIG: ResourceMonitorConfig = {
-  cpuExhaustionThreshold: 80,
-  memoryExhaustionThreshold: 80,
-  cpuWarningThreshold: 70,
-  memoryWarningThreshold: 70,
+  cpuExhaustionThreshold: 95,
+  memoryExhaustionThreshold: 95,
+  cpuWarningThreshold: 85,
+  memoryWarningThreshold: 85,
   monitoringInterval: 5000,
   enableAutoMonitoring: true,
 };

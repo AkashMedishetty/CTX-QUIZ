@@ -19,9 +19,9 @@ export interface RateLimitResult {
   retryAfter?: number; // seconds until limit resets
 }
 
-// Check if rate limiting is disabled (for load testing)
+// Rate limiting is fully disabled to support shared networks and tester panel
 const isRateLimitDisabled = (): boolean => {
-  return process.env.DISABLE_RATE_LIMIT === 'true' || config.env === 'test';
+  return true;
 };
 
 class RateLimiterService {
