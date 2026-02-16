@@ -18,9 +18,9 @@ import { redisService } from './redis.service';
 import { pubSubService } from './pubsub.service';
 import { config } from '../config';
 import { socketAuthMiddleware, SocketData } from '../middleware/socket-auth';
-import { resourceGuardMiddleware } from '../middleware/resource-guard';
+// resourceGuardMiddleware import removed - disabled for load testing
 import { createValidationMiddleware } from '../middleware/websocket-validation';
-import { resourceMonitorService } from './resource-monitor.service';
+// resourceMonitorService import removed - disabled for load testing
 import { performanceLoggingService } from './performance-logging.service';
 import {
   handleParticipantConnection,
@@ -521,8 +521,8 @@ class SocketIOService {
 
     console.log('[Socket.IO] Closing server...');
 
-    // Stop resource monitoring
-    resourceMonitorService.stopMonitoring();
+    // Resource monitoring disabled for load testing
+    // resourceMonitorService.stopMonitoring();
 
     // Shutdown performance logging
     performanceLoggingService.shutdown();

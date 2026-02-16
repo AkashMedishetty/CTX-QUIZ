@@ -520,14 +520,24 @@ class RedisDataStructuresService {
    */
 
   /**
-   * Add answer to buffer (write-behind cache)
+   * Add answer to buffer (write-behind cache).
+   * Also stores in a hash for O(1) lookup by answerId.
    */
   async addAnswerToBuffer(sessionId: string, answer: Answer): Promise<void> {
     const client = redisService.getClient();
-    const key = `session:${sessionId}:answers:buffer`;
+    const listKey = `session:${sessionId}:answers:buffer`;
+    const hashKey = `session:${sessionId}:answers:hash`;
+    const answerJson = JSON.stringify(answer);
 
-    await client.lpush(key, JSON.stringify(answer));
-    await client.expire(key, TTL.ANSWER_BUFFER);
+    // Write to both list (for batch flush) and hash (for O(1) scoring lookup)
+    await Promise.all([
+      client.lpush(listKey, answerJson),
+      client.hset(hashKey, answer.answerId, answerJson),
+    ]);
+    
+    // Set TTLs (cheap, idempotent)
+    client.expire(listKey, TTL.ANSWER_BUFFER).catch(() => {});
+    client.expire(hashKey, TTL.ANSWER_BUFFER).catch(() => {});
   }
 
   /**

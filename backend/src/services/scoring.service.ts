@@ -72,6 +72,20 @@ class ScoringService {
   private lastValidScores: Map<string, ScoreCalculation> = new Map();
 
   /**
+   * In-memory question cache to avoid hitting MongoDB for the same question 100+ times per round.
+   * Key: `${sessionId}:${questionId}`, Value: Question
+   * Cleared when a new question starts (via clearQuestionCache).
+   */
+  private questionCache: Map<string, Question> = new Map();
+
+  /**
+   * In-memory session exam-mode cache to avoid hitting MongoDB per answer for negative marking config.
+   * Key: sessionId, Value: { negativeMarkingEnabled, negativeMarkingPercentage }
+   * Cleared per session end.
+   */
+  private examModeCache: Map<string, { negativeMarkingEnabled: boolean; negativeMarkingPercentage: number }> = new Map();
+
+  /**
    * Start the scoring worker
    * 
    * Creates a dedicated Redis subscriber to avoid message handler conflicts
@@ -164,6 +178,24 @@ class ScoringService {
   }
 
   /**
+   * Clear question cache (call when a new question starts or round ends)
+   */
+  clearQuestionCache(): void {
+    this.questionCache.clear();
+  }
+
+  /**
+   * Clear exam mode cache for a session
+   */
+  clearExamModeCache(sessionId?: string): void {
+    if (sessionId) {
+      this.examModeCache.delete(sessionId);
+    } else {
+      this.examModeCache.clear();
+    }
+  }
+
+  /**
    * Process scoring message from Redis pub/sub
    * 
    * Implements error recovery pattern (Requirement 17.4):
@@ -177,34 +209,34 @@ class ScoringService {
   private async processScoringMessage(message: string): Promise<void> {
     let scoringMessage: ScoringMessage | null = null;
     
-    // Start performance timer for scoring calculation
     const endTimer = performanceLoggingService.startTimer('scoring_calculation');
     
     try {
       scoringMessage = JSON.parse(message);
 
-      console.log('[Scoring Service] Processing scoring message:', {
-        answerId: scoringMessage!.answerId,
-        participantId: scoringMessage!.participantId,
-        questionId: scoringMessage!.questionId,
-      });
-
-      // Get answer from Redis buffer
+      // Get answer from Redis hash (O(1) lookup)
       const answer = await this.getAnswerFromBuffer(
         scoringMessage!.sessionId,
         scoringMessage!.answerId
       );
 
       if (!answer) {
-        console.error('[Scoring Service] Answer not found in buffer:', scoringMessage!.answerId);
         return;
       }
 
-      // Get question details from MongoDB
+      // Get question details (cached after first fetch per round)
       const question = await this.getQuestion(scoringMessage!.sessionId, scoringMessage!.questionId);
 
       if (!question) {
-        console.error('[Scoring Service] Question not found:', scoringMessage!.questionId);
+        return;
+      }
+
+      // Fetch participant session ONCE and pass through
+      const participantSession = await redisDataStructuresService.getParticipantSession(
+        scoringMessage!.participantId
+      );
+
+      if (!participantSession) {
         return;
       }
 
@@ -215,17 +247,19 @@ class ScoringService {
         scoringMessage!.participantId,
         scoringMessage!.sessionId,
         scoringMessage!.answerId,
-        scoringMessage!.questionId
+        scoringMessage!.questionId,
+        participantSession
       );
 
       // Update participant score in Redis
       await this.updateParticipantScore(
         scoringMessage!.participantId,
         scoringMessage!.sessionId,
-        scoreCalculation
+        scoreCalculation,
+        participantSession
       );
 
-      // Update leaderboard in Redis
+      // Update leaderboard in Redis (reuse participantSession after score update)
       await this.updateLeaderboard(
         scoringMessage!.participantId,
         scoringMessage!.sessionId
@@ -244,38 +278,27 @@ class ScoringService {
 
       this.answerBatch.push(enrichedAnswer);
 
-      // Flush batch if size limit reached
       if (this.answerBatch.length >= this.BATCH_SIZE) {
         await this.flushAnswerBatch();
       }
 
-      // Broadcast answer result to participant (for personal result display)
-      await this.broadcastAnswerResult(
-        scoringMessage!.participantId,
-        scoringMessage!.questionId,
-        scoreCalculation
-      );
-
-      // Broadcast score update to participant
-      await this.broadcastScoreUpdate(
-        scoringMessage!.participantId,
-        scoringMessage!.sessionId
-      );
-
-      console.log('[Scoring Service] Score calculation completed:', {
-        answerId: scoringMessage!.answerId,
-        participantId: scoringMessage!.participantId,
-        totalPoints: scoreCalculation.totalPoints,
-        isCorrect: scoreCalculation.isCorrect,
-      });
+      // Broadcast answer result + score update in parallel (fire-and-forget)
+      Promise.all([
+        this.broadcastAnswerResult(
+          scoringMessage!.participantId,
+          scoringMessage!.questionId,
+          scoreCalculation
+        ),
+        this.broadcastScoreUpdate(
+          scoringMessage!.participantId,
+          scoringMessage!.sessionId
+        ),
+      ]).catch(() => { /* ignore broadcast errors */ });
       
-      // End performance timer
       endTimer();
     } catch (error) {
-      // End performance timer even on error
       endTimer();
       
-      // Log error with full context for debugging (Requirement 17.4)
       const errorContext: ScoreCalculationErrorContext = {
         participantId: scoringMessage?.participantId ?? 'unknown',
         questionId: scoringMessage?.questionId ?? 'unknown',
@@ -287,7 +310,6 @@ class ScoringService {
       };
       
       console.error('[Scoring] Error processing scoring message:', errorContext);
-      // Don't throw - continue processing other messages (Requirement 17.4)
     }
   }
 
@@ -314,23 +336,22 @@ class ScoringService {
     participantId: string,
     sessionId: string,
     answerId: string,
-    questionId: string
+    questionId: string,
+    participantSession: any
   ): Promise<ScoreCalculation> {
     try {
-      // Attempt to calculate score
       const score = await this.calculateScore(
         answer,
         question,
         participantId,
-        sessionId
+        sessionId,
+        participantSession
       );
       
-      // Store as last valid score for this participant
       this.lastValidScores.set(participantId, score);
       
       return score;
     } catch (error) {
-      // Log error with full context (Requirement 17.4)
       const errorContext: ScoreCalculationErrorContext = {
         participantId,
         questionId,
@@ -343,19 +364,12 @@ class ScoringService {
       
       console.error('[Scoring] Error calculating score:', errorContext);
       
-      // Return last valid score or default score (Requirement 17.4)
       const lastValidScore = this.lastValidScores.get(participantId);
       
       if (lastValidScore) {
-        console.log('[Scoring] Using last valid score for participant:', {
-          participantId,
-          lastValidScore: lastValidScore.totalPoints,
-        });
         return lastValidScore;
       }
       
-      // Return zero score if no previous valid score exists
-      console.log('[Scoring] No previous valid score, returning zero score for participant:', participantId);
       return {
         basePoints: 0,
         speedBonus: 0,
@@ -369,25 +383,27 @@ class ScoringService {
   }
 
   /**
-   * Get answer from Redis buffer
-   * 
-   * @param sessionId - Session ID
-   * @param answerId - Answer ID
-   * @returns Answer object or null if not found
+   * Get answer from Redis hash (O(1) lookup).
+   * Falls back to list scan if hash entry not found (backward compat).
    */
   private async getAnswerFromBuffer(
     sessionId: string,
     answerId: string
   ): Promise<any | null> {
     const redis = redisService.getClient();
+    
+    // Try O(1) hash lookup first
+    const hashKey = `session:${sessionId}:answers:hash`;
+    const answerJson = await redis.hget(hashKey, answerId);
+    if (answerJson) {
+      return JSON.parse(answerJson);
+    }
+
+    // Fallback: scan the list (for answers written before this optimization)
     const bufferKey = `session:${sessionId}:answers:buffer`;
-
-    // Get all answers from buffer
     const answers = await redis.lrange(bufferKey, 0, -1);
-
-    // Find the answer with matching ID
-    for (const answerJson of answers) {
-      const answer = JSON.parse(answerJson);
+    for (const json of answers) {
+      const answer = JSON.parse(json);
       if (answer.answerId === answerId) {
         return answer;
       }
@@ -397,45 +413,34 @@ class ScoringService {
   }
 
   /**
-   * Get question details from MongoDB
-   * 
-   * @param sessionId - Session ID
-   * @param questionId - Question ID
-   * @returns Question object or null if not found
+   * Get question details from MongoDB (cached per round).
+   * Same question is fetched once and reused for all 100+ participants.
    */
   private async getQuestion(
     sessionId: string,
     questionId: string
   ): Promise<Question | null> {
+    const cacheKey = `${sessionId}:${questionId}`;
+    const cached = this.questionCache.get(cacheKey);
+    if (cached) return cached;
+
     try {
       const db = mongodbService.getDb();
       const sessionsCollection = db.collection('sessions');
-
-      // Get session to find quiz ID
       const session = await sessionsCollection.findOne({ sessionId });
 
-      if (!session) {
-        console.error('[Scoring Service] Session not found:', sessionId);
-        return null;
-      }
+      if (!session) return null;
 
-      // Get quiz with questions
       const quizzesCollection = db.collection('quizzes');
       const quiz = await quizzesCollection.findOne({ _id: session.quizId });
 
-      if (!quiz) {
-        console.error('[Scoring Service] Quiz not found:', session.quizId);
-        return null;
-      }
+      if (!quiz) return null;
 
-      // Find question in quiz
       const question = quiz.questions.find((q: Question) => q.questionId === questionId);
+      if (!question) return null;
 
-      if (!question) {
-        console.error('[Scoring Service] Question not found in quiz:', questionId);
-        return null;
-      }
-
+      // Cache for this round
+      this.questionCache.set(cacheKey, question);
       return question;
     } catch (error) {
       console.error('[Scoring Service] Error getting question:', error);
@@ -464,7 +469,8 @@ class ScoringService {
     answer: any,
     question: Question,
     participantId: string,
-    sessionId: string
+    sessionId: string,
+    participantSession: any
   ): Promise<ScoreCalculation> {
     // Get correct options
     const correctOptions = question.options
@@ -508,7 +514,8 @@ class ScoringService {
       streakBonus = await this.calculateStreakBonus(
         participantId,
         sessionId,
-        question.scoring.basePoints
+        question.scoring.basePoints,
+        participantSession
       );
     } else {
       // Reset streak on wrong answer
@@ -523,7 +530,8 @@ class ScoringService {
       negativeDeduction = await this.calculateNegativeDeduction(
         sessionId,
         participantId,
-        question.scoring.basePoints
+        question.scoring.basePoints,
+        participantSession
       );
     }
 
@@ -663,33 +671,24 @@ class ScoringService {
   private async calculateStreakBonus(
     participantId: string,
     _sessionId: string,
-    basePoints: number
+    basePoints: number,
+    participantSession: any
   ): Promise<number> {
     try {
-      // Get current streak count from Redis
-      const participantSession = await redisDataStructuresService.getParticipantSession(
-        participantId
-      );
-
       if (!participantSession) {
         return 0;
       }
 
       const currentStreak = participantSession.streakCount || 0;
-
-      // Increment streak count
       const newStreak = currentStreak + 1;
 
-      // Update streak count in Redis
       await redisDataStructuresService.updateParticipantStreak(participantId, newStreak);
 
-      // Calculate streak bonus (only after first correct answer)
       if (newStreak <= 1) {
-        return 0; // No bonus for first correct answer
+        return 0;
       }
 
       const streakBonus = basePoints * 0.1 * (newStreak - 1);
-
       return Math.round(streakBonus);
     } catch (error) {
       console.error('[Scoring Service] Error calculating streak bonus:', error);
@@ -717,65 +716,47 @@ class ScoringService {
    */
   private async calculateNegativeDeduction(
     sessionId: string,
-    participantId: string,
-    basePoints: number
+    _participantId: string,
+    basePoints: number,
+    participantSession: any
   ): Promise<number> {
     try {
-      // Get session to check exam mode configuration
-      const db = mongodbService.getDb();
-      const sessionsCollection = db.collection('sessions');
-      const session = await sessionsCollection.findOne({ sessionId });
+      // Check exam mode cache first
+      let examMode = this.examModeCache.get(sessionId);
+      
+      if (!examMode) {
+        // Fetch from MongoDB and cache
+        const db = mongodbService.getDb();
+        const sessionsCollection = db.collection('sessions');
+        const session = await sessionsCollection.findOne({ sessionId });
 
-      if (!session) {
-        console.error('[Scoring Service] Session not found for negative marking:', sessionId);
+        if (!session || !session.examMode || !session.examMode.negativeMarkingEnabled) {
+          this.examModeCache.set(sessionId, { negativeMarkingEnabled: false, negativeMarkingPercentage: 0 });
+          return 0;
+        }
+
+        examMode = {
+          negativeMarkingEnabled: session.examMode.negativeMarkingEnabled,
+          negativeMarkingPercentage: session.examMode.negativeMarkingPercentage || 0,
+        };
+        this.examModeCache.set(sessionId, examMode);
+      }
+
+      if (!examMode.negativeMarkingEnabled || examMode.negativeMarkingPercentage <= 0) {
         return 0;
       }
 
-      // Check if negative marking is enabled
-      const examMode = session.examMode;
-      if (!examMode || !examMode.negativeMarkingEnabled) {
-        return 0; // Negative marking not enabled
-      }
-
-      const negativeMarkingPercentage = examMode.negativeMarkingPercentage || 0;
-      if (negativeMarkingPercentage <= 0) {
-        return 0; // No deduction if percentage is 0 or negative
-      }
-
-      // Calculate deduction: basePoints × negativeMarkingPercentage / 100
-      // Requirement 12.3
-      const deduction = Math.floor(basePoints * negativeMarkingPercentage / 100);
-
-      // Get current participant score to ensure we don't go below zero
-      // Requirement 12.4
-      const participantSession = await redisDataStructuresService.getParticipantSession(
-        participantId
-      );
+      const deduction = Math.floor(basePoints * examMode.negativeMarkingPercentage / 100);
 
       if (!participantSession) {
-        return deduction; // Return full deduction, floor will be applied in updateParticipantScore
+        return deduction;
       }
 
       const currentScore = participantSession.totalScore || 0;
-
-      // Cap deduction so score doesn't go below zero
-      // Requirement 12.4: Ensure participant scores do not go below zero
-      const cappedDeduction = Math.min(deduction, currentScore);
-
-      console.log('[Scoring Service] Calculated negative marking deduction:', {
-        sessionId,
-        participantId,
-        basePoints,
-        negativeMarkingPercentage,
-        calculatedDeduction: deduction,
-        currentScore,
-        cappedDeduction,
-      });
-
-      return cappedDeduction;
+      return Math.min(deduction, currentScore);
     } catch (error) {
       console.error('[Scoring Service] Error calculating negative deduction:', error);
-      return 0; // Return 0 on error to avoid penalizing participant
+      return 0;
     }
   }
 
@@ -790,39 +771,23 @@ class ScoringService {
   private async updateParticipantScore(
     participantId: string,
     _sessionId: string,
-    scoreCalculation: ScoreCalculation
+    scoreCalculation: ScoreCalculation,
+    participantSession: any
   ): Promise<void> {
     try {
       const redis = redisService.getClient();
       const participantKey = `participant:${participantId}:session`;
 
-      // Get current score
-      const participantSession = await redisDataStructuresService.getParticipantSession(
-        participantId
-      );
-
       if (!participantSession) {
-        console.error('[Scoring Service] Participant session not found:', participantId);
         return;
       }
 
       const currentScore = participantSession.totalScore || 0;
-
-      // Calculate new score and ensure it doesn't go below zero (Requirement 12.4)
       const newScore = Math.max(0, currentScore + scoreCalculation.totalPoints);
 
-      // Update participant score in Redis
       await redis.hset(participantKey, {
         totalScore: newScore.toString(),
         lastQuestionScore: scoreCalculation.totalPoints.toString(),
-      });
-
-      console.log('[Scoring Service] Updated participant score:', {
-        participantId,
-        oldScore: currentScore,
-        newScore,
-        pointsAdded: scoreCalculation.totalPoints,
-        negativeDeduction: scoreCalculation.negativeDeduction,
       });
     } catch (error) {
       console.error('[Scoring Service] Error updating participant score:', error);
@@ -848,33 +813,20 @@ class ScoringService {
       const redis = redisService.getClient();
       const leaderboardKey = `session:${sessionId}:leaderboard`;
 
-      // Get participant score and time
+      // Re-fetch participant session to get updated score after updateParticipantScore
       const participantSession = await redisDataStructuresService.getParticipantSession(
         participantId
       );
 
       if (!participantSession) {
-        console.error('[Scoring Service] Participant session not found:', participantId);
         return;
       }
 
       const totalScore = participantSession.totalScore || 0;
       const totalTimeMs = participantSession.totalTimeMs || 0;
-
-      // Calculate leaderboard score with tie-breaker
-      // Higher score = better, lower time = better
-      // Formula: totalScore - (totalTimeMs / 1000000000)
       const leaderboardScore = totalScore - totalTimeMs / 1000000000;
 
-      // Update leaderboard sorted set
       await redis.zadd(leaderboardKey, leaderboardScore, participantId);
-
-      console.log('[Scoring Service] Updated leaderboard:', {
-        participantId,
-        totalScore,
-        totalTimeMs,
-        leaderboardScore,
-      });
     } catch (error) {
       console.error('[Scoring Service] Error updating leaderboard:', error);
     }
@@ -909,14 +861,6 @@ class ScoringService {
           totalPoints: scoreCalculation.totalPoints,
         }
       );
-
-      console.log('[Scoring Service] Broadcasted answer result:', {
-        participantId,
-        questionId,
-        isCorrect: scoreCalculation.isCorrect,
-        negativeDeduction: scoreCalculation.negativeDeduction,
-        totalPoints: scoreCalculation.totalPoints,
-      });
     } catch (error) {
       console.error('[Scoring Service] Error broadcasting answer result:', error);
     }
@@ -937,41 +881,33 @@ class ScoringService {
     sessionId: string
   ): Promise<void> {
     try {
-      // Get participant score and rank
       const participantSession = await redisDataStructuresService.getParticipantSession(
         participantId
       );
 
       if (!participantSession) {
-        console.error('[Scoring Service] Participant session not found:', participantId);
         return;
       }
 
-      // Get rank from leaderboard
       const redis = redisService.getClient();
       const leaderboardKey = `session:${sessionId}:leaderboard`;
       
-      const rank = await redis.zrevrank(leaderboardKey, participantId);
-      const totalParticipants = await redis.zcard(leaderboardKey);
+      const [rank, totalParticipants] = await Promise.all([
+        redis.zrevrank(leaderboardKey, participantId),
+        redis.zcard(leaderboardKey),
+      ]);
 
-      // Broadcast score update to participant
       await pubSubService.publishToParticipant(
         participantId,
         'score_updated',
         {
           participantId,
           totalScore: participantSession.totalScore || 0,
-          rank: rank !== null ? rank + 1 : null, // Convert 0-based to 1-based
+          rank: rank !== null ? rank + 1 : null,
           totalParticipants,
           streakCount: participantSession.streakCount || 0,
         }
       );
-
-      console.log('[Scoring Service] Broadcasted score update:', {
-        participantId,
-        totalScore: participantSession.totalScore,
-        rank: rank !== null ? rank + 1 : null,
-      });
     } catch (error) {
       console.error('[Scoring Service] Error broadcasting score update:', error);
     }
@@ -1056,7 +992,8 @@ class ScoringService {
 
     // Clear last valid scores cache
     this.lastValidScores.clear();
-    console.log('[Scoring Service] Cleared last valid scores cache');
+    this.questionCache.clear();
+    this.examModeCache.clear();
 
     console.log('[Scoring Service] Scoring worker stopped');
   }

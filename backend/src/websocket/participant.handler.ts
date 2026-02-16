@@ -12,11 +12,33 @@
  */
 
 import { Socket } from 'socket.io';
+import { z } from 'zod';
+import { v4 as uuidv4 } from 'uuid';
 import { SocketData } from '../middleware/socket-auth';
 import { redisService } from '../services/redis.service';
 import { mongodbService } from '../services/mongodb.service';
 import { performanceLoggingService } from '../services/performance-logging.service';
-import { Session } from '../models/types';
+import { answerValidationService } from '../services/answer-validation.service';
+import { redisDataStructuresService } from '../services/redis-data-structures.service';
+import { broadcastService } from '../services/broadcast.service';
+import { sessionRecoveryService } from '../services/session-recovery.service';
+import { Session, SubmitAnswerRequest } from '../models/types';
+
+// Pre-compiled Zod schema for answer submission (avoid re-creating per request)
+const submitAnswerZodSchema = z.object({
+  questionId: z.string().uuid(),
+  selectedOptions: z.array(z.string().uuid()),
+  answerText: z.string().optional(),
+  answerNumber: z.number().optional(),
+  clientTimestamp: z.number(),
+}).refine(
+  (data) => {
+    return data.selectedOptions.length > 0 || 
+           data.answerText !== undefined || 
+           data.answerNumber !== undefined;
+  },
+  { message: 'At least one answer type must be provided' }
+);
 
 /**
  * Handle participant connection
@@ -60,14 +82,12 @@ export async function handleParticipantConnection(socket: Socket): Promise<void>
 
     // If session is in LOBBY state, broadcast lobby_state
     if (sessionState.state === 'LOBBY') {
-      const { broadcastService } = await import('../services/broadcast.service');
       await broadcastService.broadcastLobbyState(sessionId);
     }
 
     // Broadcast participant_status_changed to controller (connected)
     // Requirements: 8.6, 13.4
     try {
-      const { broadcastService } = await import('../services/broadcast.service');
       await broadcastService.broadcastParticipantStatusChanged(
         sessionId,
         participantId!,
@@ -128,7 +148,6 @@ export async function handleParticipantDisconnection(
   // Broadcast participant_status_changed to controller (disconnected)
   // Requirements: 8.6, 13.4
   try {
-    const { broadcastService } = await import('../services/broadcast.service');
     await broadcastService.broadcastParticipantStatusChanged(
       sessionId,
       participantId!,
@@ -364,43 +383,10 @@ async function handleSubmitAnswer(socket: Socket, data: any): Promise<void> {
   const endTimer = performanceLoggingService.startTimer('answer_submission');
 
   try {
-    console.log('[Participant Handler] Received submit_answer:', {
-      socketId: socket.id,
-      participantId,
-      sessionId,
-      data,
-    });
-
-    // Import validation schema
-    const { z } = await import('zod');
-    
-    // 1. Validate answer schema
-    const submitAnswerSchema = z.object({
-      questionId: z.string().uuid(),
-      selectedOptions: z.array(z.string().uuid()),
-      answerText: z.string().optional(),
-      answerNumber: z.number().optional(),
-      clientTimestamp: z.number(),
-    }).refine(
-      (data) => {
-        // At least one of: selectedOptions (non-empty), answerText, or answerNumber must be provided
-        return data.selectedOptions.length > 0 || 
-               data.answerText !== undefined || 
-               data.answerNumber !== undefined;
-      },
-      {
-        message: 'At least one answer type must be provided',
-      }
-    );
-
-    const parseResult = submitAnswerSchema.safeParse(data);
+    // 1. Validate answer schema (using pre-compiled schema)
+    const parseResult = submitAnswerZodSchema.safeParse(data);
 
     if (!parseResult.success) {
-      console.warn('[Participant Handler] Invalid answer schema:', {
-        participantId,
-        errors: parseResult.error.errors,
-      });
-
       socket.emit('answer_rejected', {
         questionId: data.questionId,
         reason: 'INVALID_SCHEMA',
@@ -412,21 +398,13 @@ async function handleSubmitAnswer(socket: Socket, data: any): Promise<void> {
     const answerRequest = parseResult.data;
 
     // 2-6. Validate answer submission using validation service
-    const { answerValidationService } = await import('../services/answer-validation.service');
-    // Cast to SubmitAnswerRequest since Zod has validated the schema
     const validationResult = await answerValidationService.validateAnswer(
       sessionId,
       participantId!,
-      answerRequest as import('../models/types').SubmitAnswerRequest
+      answerRequest as SubmitAnswerRequest
     );
 
     if (!validationResult.valid) {
-      console.warn('[Participant Handler] Answer validation failed:', {
-        participantId,
-        questionId: answerRequest.questionId,
-        reason: validationResult.reason,
-      });
-
       socket.emit('answer_rejected', {
         questionId: answerRequest.questionId,
         reason: validationResult.reason,
@@ -442,12 +420,6 @@ async function handleSubmitAnswer(socket: Socket, data: any): Promise<void> {
     );
 
     if (!marked) {
-      // Race condition: another submission came in between validation and marking
-      console.warn('[Participant Handler] Race condition detected - answer already submitted:', {
-        participantId,
-        questionId: answerRequest.questionId,
-      });
-
       socket.emit('answer_rejected', {
         questionId: answerRequest.questionId,
         reason: 'ALREADY_SUBMITTED',
@@ -456,24 +428,20 @@ async function handleSubmitAnswer(socket: Socket, data: any): Promise<void> {
       return;
     }
 
-    // 6.5. Refresh participant session TTL on activity (Requirement 8.5)
-    // This ensures the 5-minute TTL is refreshed on any participant activity
-    const { redisDataStructuresService } = await import('../services/redis-data-structures.service');
-    await redisDataStructuresService.refreshParticipantSession(participantId!);
+    // Increment answer count + refresh TTL + get session state in parallel
+    const redis = redisService.getClient();
+    const countKey = `session:${sessionId}:question:${answerRequest.questionId}:answer_count`;
+    const [answerCount, , sessionState] = await Promise.all([
+      redis.incr(countKey),
+      redisDataStructuresService.refreshParticipantSession(participantId!),
+      redisDataStructuresService.getSessionState(sessionId),
+    ]);
+    // Set TTL on counter key (only needed once, but cheap to repeat)
+    if (answerCount === 1) {
+      redis.expire(countKey, 3600).catch(() => {});
+    }
 
-    console.log('[Participant Handler] Refreshed participant session TTL on answer submission:', {
-      participantId,
-    });
-
-    // 7. Calculate response time
-    const sessionState = await redisDataStructuresService.getSessionState(sessionId);
-    
     if (!sessionState || !sessionState.currentQuestionStartTime) {
-      console.error('[Participant Handler] Cannot calculate response time - missing start time:', {
-        sessionId,
-        questionId: answerRequest.questionId,
-      });
-
       socket.emit('answer_rejected', {
         questionId: answerRequest.questionId,
         reason: 'QUESTION_NOT_ACTIVE',
@@ -484,12 +452,9 @@ async function handleSubmitAnswer(socket: Socket, data: any): Promise<void> {
 
     const currentTime = Date.now();
     const responseTimeMs = currentTime - sessionState.currentQuestionStartTime;
-
-    // Generate answer ID
-    const { v4: uuidv4 } = await import('uuid');
     const answerId = uuidv4();
 
-    // 8. Write answer to Redis buffer immediately (write-behind pattern)
+    // Write answer to Redis buffer
     const answer = {
       answerId,
       sessionId,
@@ -502,16 +467,21 @@ async function handleSubmitAnswer(socket: Socket, data: any): Promise<void> {
       responseTimeMs,
     };
 
-    await redisDataStructuresService.addAnswerToBuffer(sessionId, answer);
-
-    console.log('[Participant Handler] Answer written to Redis buffer:', {
+    // Write to buffer + publish scoring in parallel
+    const scoringPayload = JSON.stringify({
       answerId,
-      participantId,
+      participantId: participantId!,
       questionId: answerRequest.questionId,
-      responseTimeMs,
+      sessionId,
+      timestamp: currentTime,
     });
 
-    // 9. Emit answer_accepted to participant
+    await Promise.all([
+      redisDataStructuresService.addAnswerToBuffer(sessionId, answer),
+      redis.publish(`session:${sessionId}:scoring`, scoringPayload),
+    ]);
+
+    // Emit answer_accepted immediately (don't wait for answer count)
     socket.emit('answer_accepted', {
       questionId: answerRequest.questionId,
       answerId,
@@ -519,61 +489,20 @@ async function handleSubmitAnswer(socket: Socket, data: any): Promise<void> {
       serverTimestamp: currentTime,
     });
 
-    console.log('[Participant Handler] Answer accepted and acknowledged:', {
-      answerId,
-      participantId,
-      questionId: answerRequest.questionId,
-    });
-
-    // 10. Publish to scoring worker via Redis pub/sub
-    // This will be implemented in Task 18.1 (background worker for score calculation)
-    // For now, we'll publish a message that the worker will process
-    const { redisService } = await import('../services/redis.service');
-    const redis = redisService.getClient();
-    
-    await redis.publish(
-      `session:${sessionId}:scoring`,
-      JSON.stringify({
-        answerId,
-        participantId: participantId!,
-        questionId: answerRequest.questionId,
-        sessionId,
-        timestamp: currentTime,
-      })
-    );
-
-    console.log('[Participant Handler] Published to scoring worker:', {
-      answerId,
-      participantId,
-      questionId: answerRequest.questionId,
-    });
-
-    // Broadcast answer count update to controller
-    // This helps the controller track how many participants have answered
-    const answerCount = await getAnswerCountForQuestion(sessionId, answerRequest.questionId);
-    const participantCount = sessionState.participantCount;
-
-    const { broadcastService } = await import('../services/broadcast.service');
-    await broadcastService.broadcastAnswerCountUpdated(
+    // Broadcast answer count (fire-and-forget, don't block the response)
+    broadcastService.broadcastAnswerCountUpdated(
       sessionId,
       answerRequest.questionId,
       answerCount,
-      participantCount
-    );
-
-    console.log('[Participant Handler] Answer submission completed successfully:', {
-      answerId,
-      participantId,
-      questionId: answerRequest.questionId,
-      responseTimeMs,
-    });
+      sessionState.participantCount
+    ).catch(() => { /* ignore broadcast errors */ });
 
     // End performance timer
     endTimer();
   } catch (error) {
     // End performance timer even on error
     endTimer();
-    
+
     console.error('[Participant Handler] Error handling submit_answer:', error);
 
     socket.emit('error', {
@@ -582,55 +511,6 @@ async function handleSubmitAnswer(socket: Socket, data: any): Promise<void> {
     });
   }
 }
-
-/**
- * Get answer count for a specific question
- * 
- * Counts how many participants have submitted answers for the given question
- * by checking the rate limit keys in Redis.
- * 
- * @param sessionId - Session ID
- * @param questionId - Question ID
- * @returns Number of participants who have answered
- */
-async function getAnswerCountForQuestion(
-  sessionId: string,
-  questionId: string
-): Promise<number> {
-  try {
-    const { redisService } = await import('../services/redis.service');
-    const redis = redisService.getClient();
-
-    // Get all participants for this session
-    const { mongodbService } = await import('../services/mongodb.service');
-    const db = mongodbService.getDb();
-    const participantsCollection = db.collection('participants');
-
-    const participants = await participantsCollection
-      .find({
-        sessionId,
-        isActive: true,
-        isEliminated: false,
-      })
-      .toArray();
-
-    // Count how many have answered by checking rate limit keys
-    let count = 0;
-    for (const participant of participants) {
-      const key = `ratelimit:answer:${participant.participantId}:${questionId}`;
-      const exists = await redis.exists(key);
-      if (exists) {
-        count++;
-      }
-    }
-
-    return count;
-  } catch (error) {
-    console.error('[Participant Handler] Error getting answer count:', error);
-    return 0;
-  }
-}
-
 
 /**
  * Handle reconnect_session event from participant
@@ -655,8 +535,6 @@ async function handleReconnectSession(socket: Socket, data: any): Promise<void> 
     });
 
     // Import validation schema
-    const { z } = await import('zod');
-
     // 1. Validate reconnection request schema
     const reconnectSessionSchema = z.object({
       sessionId: z.string().uuid(),
@@ -681,7 +559,6 @@ async function handleReconnectSession(socket: Socket, data: any): Promise<void> 
     const { sessionId, participantId, lastKnownQuestionId } = parseResult.data;
 
     // 2. Call session recovery service to restore session state
-    const { sessionRecoveryService } = await import('../services/session-recovery.service');
     const recoveryResult = await sessionRecoveryService.recoverSession(
       participantId,
       sessionId,
@@ -754,9 +631,6 @@ async function handleReconnectSession(socket: Socket, data: any): Promise<void> 
     // Broadcast participant_status_changed to controller (reconnected)
     // Requirements: 8.6, 13.4
     try {
-      const { broadcastService } = await import('../services/broadcast.service');
-      const { redisDataStructuresService } = await import('../services/redis-data-structures.service');
-      
       const participantSession = await redisDataStructuresService.getParticipantSession(participantId);
       const nickname = participantSession?.nickname || 'Unknown';
 
@@ -871,9 +745,6 @@ async function handleFocusLost(socket: Socket, data: any): Promise<void> {
       data,
     });
 
-    // Import validation schema
-    const { z } = await import('zod');
-
     // 1. Validate focus_lost event schema
     const focusLostSchema = z.object({
       timestamp: z.number().positive(),
@@ -939,7 +810,6 @@ async function handleFocusLost(socket: Socket, data: any): Promise<void> {
 
     // 3. Broadcast participant_focus_changed to controller
     try {
-      const { broadcastService } = await import('../services/broadcast.service');
       await broadcastService.broadcastParticipantFocusChanged(
         sessionId,
         participantId!,
@@ -1000,9 +870,6 @@ async function handleFocusRegained(socket: Socket, data: any): Promise<void> {
       sessionId,
       data,
     });
-
-    // Import validation schema
-    const { z } = await import('zod');
 
     // 1. Validate focus_regained event schema
     const focusRegainedSchema = z.object({
@@ -1070,7 +937,6 @@ async function handleFocusRegained(socket: Socket, data: any): Promise<void> {
 
     // 3. Broadcast participant_focus_changed to controller
     try {
-      const { broadcastService } = await import('../services/broadcast.service');
       await broadcastService.broadcastParticipantFocusChanged(
         sessionId,
         participantId!,

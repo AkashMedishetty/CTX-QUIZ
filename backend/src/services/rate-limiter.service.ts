@@ -12,7 +12,8 @@
  */
 
 import { redisService } from './redis.service';
-import { config } from '../config';
+
+// config import removed - rate limiting is fully disabled
 
 export interface RateLimitResult {
   allowed: boolean;

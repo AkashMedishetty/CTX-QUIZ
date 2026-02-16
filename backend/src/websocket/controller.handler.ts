@@ -399,6 +399,9 @@ async function handleStartQuiz(
       currentQuestionStartTime: Date.now(),
     });
 
+    // Clear scoring caches for new round
+    scoringService.clearQuestionCache();
+
     // Update MongoDB
     await sessionsCollection.updateOne(
       { sessionId: data.sessionId },
@@ -682,6 +685,9 @@ async function handleNextQuestion(
 
     // There are more questions - advance to next question
     const nextQuestion = quiz.questions[nextQuestionIndex];
+
+    // Clear scoring caches for new round
+    scoringService.clearQuestionCache();
 
     // Transition session to ACTIVE_QUESTION state
     // CRITICAL: Must include currentQuestionId for answer validation to work
@@ -1257,6 +1263,9 @@ async function handleVoidQuestion(
       } else {
         // There are more questions - advance to next question
         const nextQuestion = quiz.questions[nextQuestionIndex];
+
+        // Clear scoring caches for new round
+        scoringService.clearQuestionCache();
 
         // Transition session to ACTIVE_QUESTION state with next question
         await redisDataStructuresService.updateSessionState(data.sessionId, {
