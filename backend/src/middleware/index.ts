@@ -20,3 +20,7 @@ export {
   validateMessage,
   validateOrReject,
 } from './websocket-validation';
+export { authMiddleware, optionalAuth, AuthenticatedRequest } from './auth';
+export { organizationContext, OrganizationContextRequest } from './organization-context';
+export { requireRole } from './role-guard';
+export { checkSessionLimit, checkParticipantLimit, checkBrandingAllowed } from './usage-guard';

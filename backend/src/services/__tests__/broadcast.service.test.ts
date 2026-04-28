@@ -35,6 +35,8 @@ describe('BroadcastService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    // Ensure fire-and-forget TTL refresh calls return a resolved promise
+    (redisDataStructuresService.refreshAllParticipantSessionsForQuiz as jest.Mock).mockResolvedValue(undefined);
   });
 
   describe('broadcastLobbyState', () => {

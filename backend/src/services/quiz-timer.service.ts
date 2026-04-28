@@ -205,7 +205,28 @@ export class QuizTimer {
    */
   private async tick(): Promise<void> {
     try {
-      const remaining = Math.max(0, this.endTime - Date.now());
+      const remaining = this.endTime - Date.now();
+
+      // If timer has expired, stop and fire callback WITHOUT broadcasting remainingSeconds: 0
+      if (remaining <= 0) {
+        console.log('[QuizTimer] Timer expired:', {
+          sessionId: this.sessionId,
+          questionId: this.questionId,
+        });
+
+        this.stop();
+
+        // Trigger expiration callback
+        try {
+          await this.onTimerExpired();
+        } catch (error) {
+          console.error('[QuizTimer] Error in onTimerExpired callback:', error);
+          // Don't rethrow - timer has already stopped
+        }
+        return;
+      }
+
+      // Timer still has time remaining — broadcast tick
       const remainingSeconds = Math.ceil(remaining / 1000);
       const serverTime = Date.now();
 
@@ -247,24 +268,6 @@ export class QuizTimer {
           serverTime,
         }
       );
-
-      // Check if timer expired
-      if (remainingSeconds === 0) {
-        console.log('[QuizTimer] Timer expired:', {
-          sessionId: this.sessionId,
-          questionId: this.questionId,
-        });
-
-        this.stop();
-
-        // Trigger expiration callback
-        try {
-          await this.onTimerExpired();
-        } catch (error) {
-          console.error('[QuizTimer] Error in onTimerExpired callback:', error);
-          // Don't rethrow - timer has already stopped
-        }
-      }
     } catch (error) {
       console.error('[QuizTimer] Error in tick:', error);
       // Don't stop the timer on tick errors - continue ticking

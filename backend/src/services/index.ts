@@ -27,6 +27,14 @@ export { performanceLoggingService, PerformanceLoggingService } from './performa
 export { auditLogService } from './audit-log.service';
 export { inputSanitizationService, InputSanitizationService } from './input-sanitization.service';
 export { securityLoggingService } from './security-logging.service';
+export { emailService } from './email.service';
+export { authService } from './auth.service';
+export { organizationService } from './organization.service';
+export { usageTrackerService } from './usage-tracker.service';
+export { subscriptionService } from './subscription.service';
+export type { UsageStats } from './subscription.service';
+export { razorpayService } from './razorpay.service';
+export type { RazorpayWebhookEvent } from './razorpay.service';
 
 // Export types
 export type {

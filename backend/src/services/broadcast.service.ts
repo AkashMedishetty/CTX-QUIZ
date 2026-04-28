@@ -19,6 +19,8 @@ import { metricsService } from './metrics.service';
 import { performanceLoggingService } from './performance-logging.service';
 import type { Session, Participant, Quiz, Answer } from '../models/types';
 
+export const LEADERBOARD_PAGE_SIZE = 100;
+
 class BroadcastService {
   /**
    * Broadcast lobby_state to big screen and participants
@@ -511,6 +513,12 @@ class BroadcastService {
 
       console.log('[Broadcast] Successfully broadcasted question_started for session:', sessionId);
 
+      // Refresh all participant session TTLs to prevent expiration during active quiz
+      // Fire-and-forget to avoid blocking the broadcast flow
+      redisDataStructuresService.refreshAllParticipantSessionsForQuiz(sessionId).catch((err) => {
+        console.error('[Broadcast] Failed to refresh participant TTLs on question_started:', err);
+      });
+
       // Start the quiz timer for this question
       // The timer will automatically broadcast timer_tick events every second
       // and trigger the reveal phase when it expires (or next question in exam mode)
@@ -688,6 +696,12 @@ class BroadcastService {
       );
 
       console.log('[Broadcast] Successfully broadcasted reveal_answers for session:', sessionId);
+
+      // Refresh all participant session TTLs to prevent expiration during active quiz
+      // Fire-and-forget to avoid blocking the broadcast flow
+      redisDataStructuresService.refreshAllParticipantSessionsForQuiz(sessionId).catch((err) => {
+        console.error('[Broadcast] Failed to refresh participant TTLs on reveal_answers:', err);
+      });
     } catch (error) {
       console.error('[Broadcast] Error broadcasting reveal_answers:', error);
       throw error;
@@ -916,38 +930,63 @@ class BroadcastService {
 
       for (let i = 0; i < leaderboardEntries.length; i += 2) {
         const participantId = leaderboardEntries[i];
-        // leaderboardEntries[i + 1] contains the score, but we get actual scores from Redis
+        const leaderboardScore = parseFloat(leaderboardEntries[i + 1]);
 
         // Get participant details from Redis
         const participantSession = await redisDataStructuresService.getParticipantSession(
           participantId
         );
 
-        if (!participantSession) {
-          console.warn('[Broadcast] Participant session not found:', participantId);
-          continue;
+        if (participantSession) {
+          // Get participant from MongoDB for nickname
+          const participantsCollection = mongodbService.getCollection<Participant>('participants');
+          const participant = await mongodbService.withRetry(async () => {
+            return await participantsCollection.findOne({ participantId });
+          });
+
+          if (!participant) {
+            console.warn('[Broadcast] Participant not found in MongoDB:', participantId);
+            continue;
+          }
+
+          leaderboard.push({
+            rank: Math.floor(i / 2) + 1, // 1-based rank
+            participantId,
+            nickname: participant.nickname,
+            totalScore: participantSession.totalScore || 0,
+            lastQuestionScore: parseInt(participantSession.lastQuestionScore || '0', 10),
+            streakCount: participantSession.streakCount || 0,
+            totalTimeMs: participantSession.totalTimeMs || 0,
+          });
+        } else {
+          // Redis session expired — fall back to MongoDB for participant data
+          console.warn('[Broadcast] Participant session expired, falling back to MongoDB:', participantId);
+
+          const participantsCollection = mongodbService.getCollection<Participant>('participants');
+          const participant = await mongodbService.withRetry(async () => {
+            return await participantsCollection.findOne({ participantId });
+          });
+
+          if (!participant) {
+            console.warn('[Broadcast] Participant not found in MongoDB:', participantId);
+            continue;
+          }
+
+          // Approximate totalScore from leaderboard sorted set score
+          // Leaderboard score formula: totalScore - totalTimeMs / 1e9
+          // Math.floor avoids inflating scores (Issue #7)
+          const approximatedTotalScore = Math.floor(leaderboardScore);
+
+          leaderboard.push({
+            rank: Math.floor(i / 2) + 1, // 1-based rank
+            participantId,
+            nickname: participant.nickname,
+            totalScore: participant.totalScore || approximatedTotalScore,
+            lastQuestionScore: 0,
+            streakCount: 0,
+            totalTimeMs: participant.totalTimeMs || 0,
+          });
         }
-
-        // Get participant from MongoDB for nickname
-        const participantsCollection = mongodbService.getCollection<Participant>('participants');
-        const participant = await mongodbService.withRetry(async () => {
-          return await participantsCollection.findOne({ participantId });
-        });
-
-        if (!participant) {
-          console.warn('[Broadcast] Participant not found in MongoDB:', participantId);
-          continue;
-        }
-
-        leaderboard.push({
-          rank: Math.floor(i / 2) + 1, // 1-based rank
-          participantId,
-          nickname: participant.nickname,
-          totalScore: participantSession.totalScore || 0,
-          lastQuestionScore: parseInt(participantSession.lastQuestionScore || '0', 10),
-          streakCount: participantSession.streakCount || 0,
-          totalTimeMs: participantSession.totalTimeMs || 0,
-        });
       }
 
       console.log('[Broadcast] Leaderboard prepared:', {
@@ -965,12 +1004,17 @@ class BroadcastService {
       console.log('[Broadcast] Broadcasted top 10 to big screen');
 
       // Broadcast full leaderboard to controller
+      const totalCount = leaderboard.length;
+      const firstPage = leaderboard.slice(0, LEADERBOARD_PAGE_SIZE);
       await pubSubService.publishToController(sessionId, 'leaderboard_updated', {
-        leaderboard,
-        topN: leaderboard.length,
+        leaderboard: firstPage,
+        totalCount,
+        page: 1,
+        pageSize: LEADERBOARD_PAGE_SIZE,
+        hasMore: totalCount > LEADERBOARD_PAGE_SIZE,
       });
 
-      console.log('[Broadcast] Broadcasted full leaderboard to controller');
+      console.log('[Broadcast] Broadcasted paginated leaderboard to controller');
 
       // Broadcast to participants channel (they can filter to find their own rank)
       await pubSubService.publishToParticipants(sessionId, 'leaderboard_updated', {

@@ -17,6 +17,10 @@
 
 import { Answer } from '../models/types';
 import { mongodbService } from './mongodb.service';
+import { redisService } from './redis.service';
+
+/** Redis key for the durable failed answer queue (Issue #14) */
+const FAILED_ANSWERS_QUEUE_KEY = 'answers:failed:queue';
 
 /**
  * Configuration for the batch processor
@@ -129,6 +133,11 @@ class AnswerBatchProcessor {
     this.flushInterval = setInterval(async () => {
       await this.flushIfNeeded();
     }, this.config.flushIntervalMs);
+
+    // Recover any previously failed answers from Redis (Issue #14)
+    this.recoverFailedAnswersFromRedis().catch((error) => {
+      console.error('[AnswerBatchProcessor] Error recovering failed answers from Redis on startup:', error);
+    });
 
     console.log('[AnswerBatchProcessor] Batch processor started successfully');
   }
@@ -363,8 +372,21 @@ class AnswerBatchProcessor {
       error: lastError?.message,
     });
 
-    // Store failed answers for potential recovery
+    // Store failed answers for potential recovery (in-memory for backward compatibility)
     this.failedAnswers.push(...answers);
+
+    // Persist failed answers to Redis for durability (Issue #14)
+    try {
+      const redis = redisService.getClient();
+      for (const answer of answers) {
+        await redis.lpush(FAILED_ANSWERS_QUEUE_KEY, JSON.stringify(answer));
+      }
+      console.log('[AnswerBatchProcessor] Failed answers persisted to Redis:', {
+        count: answers.length,
+      });
+    } catch (redisError) {
+      console.error('[AnswerBatchProcessor] Failed to persist failed answers to Redis:', redisError);
+    }
 
     return {
       success: false,
@@ -451,6 +473,66 @@ class AnswerBatchProcessor {
     });
 
     return result;
+  }
+
+  /**
+   * Recover failed answers from Redis durable queue (Issue #14)
+   *
+   * Pops answers from the Redis list and retries insertion to MongoDB.
+   * Called on startup to recover any previously failed answers that survived a crash.
+   */
+  async recoverFailedAnswersFromRedis(): Promise<void> {
+    try {
+      const redis = redisService.getClient();
+      const length = await redis.llen(FAILED_ANSWERS_QUEUE_KEY);
+
+      if (length === 0) {
+        console.log('[AnswerBatchProcessor] No failed answers to recover from Redis');
+        return;
+      }
+
+      console.log('[AnswerBatchProcessor] Recovering failed answers from Redis:', { count: length });
+
+      const answersToRetry: Answer[] = [];
+
+      // Pop all items from the queue
+      for (let i = 0; i < length; i++) {
+        const itemJson = await redis.rpop(FAILED_ANSWERS_QUEUE_KEY);
+        if (!itemJson) break;
+
+        try {
+          const answer = JSON.parse(itemJson) as Answer;
+          answersToRetry.push(answer);
+        } catch {
+          console.error('[AnswerBatchProcessor] Invalid failed answer JSON, discarding:', itemJson);
+        }
+      }
+
+      if (answersToRetry.length === 0) {
+        return;
+      }
+
+      // Attempt to insert recovered answers
+      const db = mongodbService.getDb();
+      const answersCollection = db.collection('answers');
+
+      try {
+        const result = await answersCollection.insertMany(answersToRetry, { ordered: false });
+        console.log('[AnswerBatchProcessor] Recovered failed answers inserted to MongoDB:', {
+          insertedCount: result.insertedCount,
+          totalRecovered: answersToRetry.length,
+        });
+      } catch (error) {
+        console.error('[AnswerBatchProcessor] Failed to insert recovered answers, re-queuing:', error);
+
+        // Re-push to Redis for next attempt
+        for (const answer of answersToRetry) {
+          await redis.lpush(FAILED_ANSWERS_QUEUE_KEY, JSON.stringify(answer));
+        }
+      }
+    } catch (error) {
+      console.error('[AnswerBatchProcessor] Error recovering failed answers from Redis:', error);
+    }
   }
 
   /**

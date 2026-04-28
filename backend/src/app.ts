@@ -14,6 +14,11 @@ import uploadRoutes from './routes/upload.routes';
 import sessionRoutes from './routes/session.routes';
 import auditLogRoutes from './routes/audit-log.routes';
 import tournamentRoutes from './routes/tournament.routes';
+import authRoutes from './routes/auth.routes';
+import organizationRoutes from './routes/organization.routes';
+import subscriptionRoutes from './routes/subscription.routes';
+import billingRoutes from './routes/billing.routes';
+import webhookRoutes from './routes/webhook.routes';
 
 /**
  * Create and configure Express application
@@ -29,6 +34,14 @@ export function createApp(): Application {
   // ===== CORS Configuration =====
   // Enable CORS for frontend access
   app.use(corsMiddleware);
+
+  // ===== Webhook Routes (raw body, before JSON parser) =====
+  // Razorpay webhooks need the raw body for signature verification
+  app.use(
+    '/api/webhooks/razorpay',
+    express.raw({ type: 'application/json' }),
+    webhookRoutes,
+  );
 
   // ===== Body Parsing =====
   // Parse JSON request bodies
@@ -63,6 +76,18 @@ export function createApp(): Application {
 
   // Tournament management endpoints
   app.use('/api/tournaments', tournamentRoutes);
+
+  // Auth endpoints (registration, login, tokens, email verification, password reset)
+  app.use('/api/auth', authRoutes);
+
+  // Organization management endpoints
+  app.use('/api/organizations', organizationRoutes);
+
+  // Subscription management endpoints
+  app.use('/api/subscriptions', subscriptionRoutes);
+
+  // Billing and invoice endpoints
+  app.use('/api/billing', billingRoutes);
 
   // ===== 404 Handler =====
   // Handle requests to non-existent routes

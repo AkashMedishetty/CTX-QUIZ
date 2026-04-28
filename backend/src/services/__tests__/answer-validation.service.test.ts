@@ -10,10 +10,12 @@
 
 import { answerValidationService } from '../answer-validation.service';
 import { redisDataStructuresService } from '../redis-data-structures.service';
+import { redisService } from '../redis.service';
 import { SubmitAnswerRequest } from '../../models/types';
 
 // Mock the redis data structures service
 jest.mock('../redis-data-structures.service');
+jest.mock('../redis.service');
 
 describe('AnswerValidationService', () => {
   const mockSessionId = 'session-123';
@@ -120,6 +122,58 @@ describe('AnswerValidationService', () => {
       expect(result.message).toBe('Question ID does not match current question');
     });
 
+    it('should reject when question has been voided', async () => {
+      (redisDataStructuresService.getSessionState as jest.Mock).mockResolvedValue({
+        state: 'ACTIVE_QUESTION',
+        currentQuestionId: mockQuestionId,
+        timerEndTime: Date.now() + 10000,
+        participantCount: 10,
+        currentQuestionIndex: 0,
+        voidedQuestions: [mockQuestionId],
+      });
+
+      const result = await answerValidationService.validateAnswer(
+        mockSessionId,
+        mockParticipantId,
+        mockAnswerRequest
+      );
+
+      expect(result.valid).toBe(false);
+      expect(result.reason).toBe('QUESTION_VOIDED');
+      expect(result.message).toBe('This question has been voided');
+    });
+
+    it('should accept answer when voidedQuestions exists but does not contain the question', async () => {
+      (redisDataStructuresService.getSessionState as jest.Mock).mockResolvedValue({
+        state: 'ACTIVE_QUESTION',
+        currentQuestionId: mockQuestionId,
+        timerEndTime: Date.now() + 10000,
+        participantCount: 10,
+        currentQuestionIndex: 0,
+        voidedQuestions: ['other-question-id'],
+      });
+
+      (redisDataStructuresService.hasAnsweredQuestion as jest.Mock).mockResolvedValue(false);
+
+      (redisDataStructuresService.getParticipantSession as jest.Mock).mockResolvedValue({
+        sessionId: mockSessionId,
+        nickname: 'TestUser',
+        totalScore: 0,
+        totalTimeMs: 0,
+        streakCount: 0,
+        isActive: true,
+        isEliminated: false,
+      });
+
+      const result = await answerValidationService.validateAnswer(
+        mockSessionId,
+        mockParticipantId,
+        mockAnswerRequest
+      );
+
+      expect(result.valid).toBe(true);
+    });
+
     it('should reject when timer end time is not set', async () => {
       (redisDataStructuresService.getSessionState as jest.Mock).mockResolvedValue({
         state: 'ACTIVE_QUESTION',
@@ -140,11 +194,11 @@ describe('AnswerValidationService', () => {
       expect(result.message).toBe('Timer not started for current question');
     });
 
-    it('should reject when timer has expired', async () => {
+    it('should reject when timer has expired beyond grace period', async () => {
       (redisDataStructuresService.getSessionState as jest.Mock).mockResolvedValue({
         state: 'ACTIVE_QUESTION',
         currentQuestionId: mockQuestionId,
-        timerEndTime: Date.now() - 1000, // Expired 1 second ago
+        timerEndTime: Date.now() - 1000, // Expired 1 second ago (well past 500ms grace)
         participantCount: 10,
         currentQuestionIndex: 0,
       });
@@ -158,6 +212,37 @@ describe('AnswerValidationService', () => {
       expect(result.valid).toBe(false);
       expect(result.reason).toBe('TIME_EXPIRED');
       expect(result.message).toBe('Answer submission time has expired');
+    });
+
+    it('should accept answer within timer grace period', async () => {
+      // Timer expired 200ms ago — within the 500ms grace period
+      (redisDataStructuresService.getSessionState as jest.Mock).mockResolvedValue({
+        state: 'ACTIVE_QUESTION',
+        currentQuestionId: mockQuestionId,
+        timerEndTime: Date.now() - 200,
+        participantCount: 10,
+        currentQuestionIndex: 0,
+      });
+
+      (redisDataStructuresService.hasAnsweredQuestion as jest.Mock).mockResolvedValue(false);
+
+      (redisDataStructuresService.getParticipantSession as jest.Mock).mockResolvedValue({
+        sessionId: mockSessionId,
+        nickname: 'TestUser',
+        totalScore: 0,
+        totalTimeMs: 0,
+        streakCount: 0,
+        isActive: true,
+        isEliminated: false,
+      });
+
+      const result = await answerValidationService.validateAnswer(
+        mockSessionId,
+        mockParticipantId,
+        mockAnswerRequest
+      );
+
+      expect(result.valid).toBe(true);
     });
 
     it('should reject when participant has already answered', async () => {
@@ -330,6 +415,95 @@ describe('AnswerValidationService', () => {
       );
 
       expect(result).toBe(false);
+    });
+  });
+
+  describe('atomicSubmitAnswer', () => {
+    const mockSessionId = 'session-123';
+    const mockParticipantId = 'participant-456';
+    const mockQuestionId = 'question-789';
+    const mockAnswerJson = JSON.stringify({
+      answerId: 'answer-001',
+      sessionId: mockSessionId,
+      participantId: mockParticipantId,
+      questionId: mockQuestionId,
+      selectedOptions: ['opt-1'],
+      submittedAt: Date.now(),
+      responseTimeMs: 1500,
+    });
+
+    let mockEval: jest.Mock;
+
+    beforeEach(() => {
+      mockEval = jest.fn();
+      (redisService.getClient as jest.Mock).mockReturnValue({
+        eval: mockEval,
+      });
+    });
+
+    it('should return success when Lua script returns 0', async () => {
+      mockEval.mockResolvedValue(0);
+
+      const result = await answerValidationService.atomicSubmitAnswer(
+        mockParticipantId,
+        mockQuestionId,
+        mockSessionId,
+        mockAnswerJson
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.reason).toBeUndefined();
+      expect(mockEval).toHaveBeenCalledWith(
+        expect.stringContaining('EXISTS'),
+        3,
+        `ratelimit:answer:${mockParticipantId}:${mockQuestionId}`,
+        `participant:${mockParticipantId}:session`,
+        `session:${mockSessionId}:answers:buffer`,
+        '300',
+        mockAnswerJson
+      );
+    });
+
+    it('should return ALREADY_ANSWERED when Lua script returns 1', async () => {
+      mockEval.mockResolvedValue(1);
+
+      const result = await answerValidationService.atomicSubmitAnswer(
+        mockParticipantId,
+        mockQuestionId,
+        mockSessionId,
+        mockAnswerJson
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.reason).toBe('ALREADY_ANSWERED');
+    });
+
+    it('should return ELIMINATED when Lua script returns 2', async () => {
+      mockEval.mockResolvedValue(2);
+
+      const result = await answerValidationService.atomicSubmitAnswer(
+        mockParticipantId,
+        mockQuestionId,
+        mockSessionId,
+        mockAnswerJson
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.reason).toBe('ELIMINATED');
+    });
+
+    it('should return INTERNAL_ERROR when eval throws', async () => {
+      mockEval.mockRejectedValue(new Error('Redis connection lost'));
+
+      const result = await answerValidationService.atomicSubmitAnswer(
+        mockParticipantId,
+        mockQuestionId,
+        mockSessionId,
+        mockAnswerJson
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.reason).toBe('INTERNAL_ERROR');
     });
   });
 });

@@ -51,6 +51,7 @@ export interface FallbackDocument {
   document: Record<string, any>;
   timestamp: number;
   operation: 'insert' | 'update';
+  _version: number;
 }
 
 // MongoDB error types that indicate unavailability
@@ -232,6 +233,7 @@ class MongoDBFallbackService {
         document,
         timestamp: Date.now(),
         operation,
+        _version: 1,
       };
 
       // Store the document with TTL
@@ -411,9 +413,47 @@ class MongoDBFallbackService {
 
       if (operation === 'insert') {
         // Use the id as a string field, not as _id (which expects ObjectId)
-        await coll.insertOne({ documentId: id, ...document } as any);
+        // Insert with _version: 1 for optimistic locking (Issue #12)
+        await coll.insertOne({ documentId: id, ...document, _version: 1 } as any);
       } else {
-        await coll.updateOne({ documentId: id } as any, { $set: document }, { upsert: true });
+        // For updates: use findOneAndUpdate with version check (Issue #12)
+        // First, read the current version
+        const existing = await coll.findOne({ documentId: id } as any);
+        const currentVersion = (existing as any)?._version || 0;
+
+        const result = await coll.findOneAndUpdate(
+          { documentId: id, _version: currentVersion } as any,
+          { $set: { ...document, _version: currentVersion + 1 } },
+          { upsert: currentVersion === 0 }
+        );
+
+        // If no document matched (version conflict), retry once with fresh read
+        if (!result && currentVersion > 0) {
+          console.warn('[MongoDB Fallback] Version conflict detected, retrying with fresh read:', {
+            collection,
+            id,
+            attemptedVersion: currentVersion,
+          });
+
+          const freshDoc = await coll.findOne({ documentId: id } as any);
+          const freshVersion = (freshDoc as any)?._version || 0;
+
+          const retryResult = await coll.findOneAndUpdate(
+            { documentId: id, _version: freshVersion } as any,
+            { $set: { ...document, _version: freshVersion + 1 } },
+            { upsert: freshVersion === 0 }
+          );
+
+          if (!retryResult && freshVersion > 0) {
+            console.error('[MongoDB Fallback] Version conflict persists after retry:', {
+              collection,
+              id,
+              freshVersion,
+            });
+            // Fall through to fallback
+            throw new Error('Optimistic locking conflict after retry');
+          }
+        }
       }
 
       return { success: true, usedFallback: false };

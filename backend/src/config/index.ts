@@ -82,6 +82,22 @@ export const config = {
   jwt: {
     secret: getJwtSecret(),
     expiresIn: getJwtExpiresIn(),
+    accessTokenExpiry: process.env.JWT_ACCESS_TOKEN_EXPIRY || '15m',
+    refreshTokenExpiry: process.env.JWT_REFRESH_TOKEN_EXPIRY || '7d',
+  },
+  
+  razorpay: {
+    keyId: process.env.RAZORPAY_KEY_ID || '',
+    keySecret: process.env.RAZORPAY_KEY_SECRET || '',
+    webhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET || '',
+  },
+  
+  smtp: {
+    host: process.env.SMTP_HOST || 'localhost',
+    port: parseInt(process.env.SMTP_PORT || '587', 10),
+    user: process.env.SMTP_USER || '',
+    pass: process.env.SMTP_PASS || '',
+    fromAddress: process.env.SMTP_FROM_ADDRESS || 'noreply@ctx.works',
   },
   
   upload: {

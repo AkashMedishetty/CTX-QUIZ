@@ -65,6 +65,60 @@ describe('MongoDBIndexesService', () => {
       expect(auditLogsIndexNames).toContain('idx_auditLogs_timestamp');
       expect(auditLogsIndexNames).toContain('idx_auditLogs_sessionId_timestamp');
       expect(auditLogsIndexNames).toContain('idx_auditLogs_eventType_timestamp');
+
+      // Verify SaaS: organizationId indexes on quizzes and sessions
+      expect(quizzesIndexNames).toContain('idx_quizzes_organizationId_createdAt');
+      expect(sessionsIndexNames).toContain('idx_sessions_organizationId_createdAt');
+
+      // Verify users collection indexes
+      expect(indexes.users).toBeDefined();
+      const usersIndexNames = indexes.users.map((idx: any) => idx.name);
+      expect(usersIndexNames).toContain('idx_users_email');
+      expect(usersIndexNames).toContain('idx_users_userId');
+
+      // Verify organizations collection indexes
+      expect(indexes.organizations).toBeDefined();
+      const orgsIndexNames = indexes.organizations.map((idx: any) => idx.name);
+      expect(orgsIndexNames).toContain('idx_organizations_organizationId');
+      expect(orgsIndexNames).toContain('idx_organizations_slug');
+      expect(orgsIndexNames).toContain('idx_organizations_ownerId');
+
+      // Verify organization_members collection indexes
+      expect(indexes.organization_members).toBeDefined();
+      const orgMembersIndexNames = indexes.organization_members.map((idx: any) => idx.name);
+      expect(orgMembersIndexNames).toContain('idx_organization_members_orgId_userId');
+      expect(orgMembersIndexNames).toContain('idx_organization_members_userId');
+
+      // Verify invitations collection indexes
+      expect(indexes.invitations).toBeDefined();
+      const invitationsIndexNames = indexes.invitations.map((idx: any) => idx.name);
+      expect(invitationsIndexNames).toContain('idx_invitations_token');
+      expect(invitationsIndexNames).toContain('idx_invitations_email_orgId');
+      expect(invitationsIndexNames).toContain('idx_invitations_expiresAt');
+
+      // Verify refresh_tokens collection indexes
+      expect(indexes.refresh_tokens).toBeDefined();
+      const refreshTokensIndexNames = indexes.refresh_tokens.map((idx: any) => idx.name);
+      expect(refreshTokensIndexNames).toContain('idx_refresh_tokens_token');
+      expect(refreshTokensIndexNames).toContain('idx_refresh_tokens_userId');
+      expect(refreshTokensIndexNames).toContain('idx_refresh_tokens_expiresAt');
+
+      // Verify subscriptions collection indexes
+      expect(indexes.subscriptions).toBeDefined();
+      const subscriptionsIndexNames = indexes.subscriptions.map((idx: any) => idx.name);
+      expect(subscriptionsIndexNames).toContain('idx_subscriptions_organizationId');
+      expect(subscriptionsIndexNames).toContain('idx_subscriptions_razorpaySubscriptionId');
+
+      // Verify invoices collection indexes
+      expect(indexes.invoices).toBeDefined();
+      const invoicesIndexNames = indexes.invoices.map((idx: any) => idx.name);
+      expect(invoicesIndexNames).toContain('idx_invoices_organizationId_createdAt');
+      expect(invoicesIndexNames).toContain('idx_invoices_invoiceId');
+
+      // Verify pricing_tiers collection indexes
+      expect(indexes.pricing_tiers).toBeDefined();
+      const pricingTiersIndexNames = indexes.pricing_tiers.map((idx: any) => idx.name);
+      expect(pricingTiersIndexNames).toContain('idx_pricing_tiers_name');
     });
 
     it('should verify index properties for quizzes collection', async () => {
@@ -180,6 +234,14 @@ describe('MongoDBIndexesService', () => {
       expect(indexes).toHaveProperty('participants');
       expect(indexes).toHaveProperty('answers');
       expect(indexes).toHaveProperty('auditLogs');
+      expect(indexes).toHaveProperty('users');
+      expect(indexes).toHaveProperty('organizations');
+      expect(indexes).toHaveProperty('organization_members');
+      expect(indexes).toHaveProperty('invitations');
+      expect(indexes).toHaveProperty('refresh_tokens');
+      expect(indexes).toHaveProperty('subscriptions');
+      expect(indexes).toHaveProperty('invoices');
+      expect(indexes).toHaveProperty('pricing_tiers');
 
       // Each collection should have at least the default _id index
       expect(indexes.quizzes.length).toBeGreaterThan(0);
@@ -187,6 +249,14 @@ describe('MongoDBIndexesService', () => {
       expect(indexes.participants.length).toBeGreaterThan(0);
       expect(indexes.answers.length).toBeGreaterThan(0);
       expect(indexes.auditLogs.length).toBeGreaterThan(0);
+      expect(indexes.users.length).toBeGreaterThan(0);
+      expect(indexes.organizations.length).toBeGreaterThan(0);
+      expect(indexes.organization_members.length).toBeGreaterThan(0);
+      expect(indexes.invitations.length).toBeGreaterThan(0);
+      expect(indexes.refresh_tokens.length).toBeGreaterThan(0);
+      expect(indexes.subscriptions.length).toBeGreaterThan(0);
+      expect(indexes.invoices.length).toBeGreaterThan(0);
+      expect(indexes.pricing_tiers.length).toBeGreaterThan(0);
     });
   });
 
@@ -202,20 +272,16 @@ describe('MongoDBIndexesService', () => {
       const indexes = await mongodbIndexesService.listIndexes();
 
       // Each collection should only have the _id index
-      expect(indexes.quizzes.length).toBe(1);
-      expect(indexes.quizzes[0].name).toBe('_id_');
+      const allCollections = [
+        'quizzes', 'sessions', 'participants', 'answers', 'auditLogs',
+        'users', 'organizations', 'organization_members', 'invitations',
+        'refresh_tokens', 'subscriptions', 'invoices', 'pricing_tiers',
+      ];
 
-      expect(indexes.sessions.length).toBe(1);
-      expect(indexes.sessions[0].name).toBe('_id_');
-
-      expect(indexes.participants.length).toBe(1);
-      expect(indexes.participants[0].name).toBe('_id_');
-
-      expect(indexes.answers.length).toBe(1);
-      expect(indexes.answers[0].name).toBe('_id_');
-
-      expect(indexes.auditLogs.length).toBe(1);
-      expect(indexes.auditLogs[0].name).toBe('_id_');
+      for (const col of allCollections) {
+        expect(indexes[col].length).toBe(1);
+        expect(indexes[col][0].name).toBe('_id_');
+      }
 
       // Recreate indexes for other tests
       await mongodbIndexesService.createIndexes();

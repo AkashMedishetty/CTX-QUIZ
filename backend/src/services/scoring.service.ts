@@ -21,6 +21,26 @@ import { pubSubService } from './pubsub.service';
 import { performanceLoggingService } from './performance-logging.service';
 import { Answer, Question } from '../models/types';
 
+/** Maximum number of entries in the lastValidScores LRU cache */
+const MAX_LAST_VALID_SCORES = 10000;
+
+/** Redis key for the MongoDB sync retry queue (Issue #6) */
+const SYNC_RETRY_KEY = 'scoring:sync:retry';
+
+/** Maximum number of retries for a failed sync operation */
+const SYNC_RETRY_MAX = 5;
+
+/** Interval in ms for the sync retry worker */
+const SYNC_RETRY_INTERVAL_MS = 30000; // 30 seconds
+
+interface SyncRetryItem {
+  participantId: string;
+  totalScore: number;
+  totalTimeMs: number;
+  timestamp: number;
+  retryCount: number;
+}
+
 interface ScoringMessage {
   answerId: string;
   participantId: string;
@@ -71,6 +91,9 @@ class ScoringService {
    */
   private lastValidScores: Map<string, ScoreCalculation> = new Map();
 
+  /** Interval timer for the sync retry worker (Issue #6) */
+  private syncRetryInterval: NodeJS.Timeout | null = null;
+
   /**
    * In-memory question cache to avoid hitting MongoDB for the same question 100+ times per round.
    * Key: `${sessionId}:${questionId}`, Value: Question
@@ -105,6 +128,9 @@ class ScoringService {
 
     // Start batch flush interval
     this.startBatchFlushInterval();
+
+    // Start the sync retry worker (Issue #6)
+    this.startSyncRetryWorker();
 
     console.log('[Scoring Service] Scoring worker started successfully');
   }
@@ -174,7 +200,13 @@ class ScoringService {
    * @returns Last valid score or undefined if not found
    */
   getLastValidScore(participantId: string): ScoreCalculation | undefined {
-    return this.lastValidScores.get(participantId);
+    const score = this.lastValidScores.get(participantId);
+    if (score !== undefined) {
+      // LRU access update: delete and re-insert to move to end
+      this.lastValidScores.delete(participantId);
+      this.lastValidScores.set(participantId, score);
+    }
+    return score;
   }
 
   /**
@@ -209,34 +241,34 @@ class ScoringService {
   private async processScoringMessage(message: string): Promise<void> {
     let scoringMessage: ScoringMessage | null = null;
     
+    // Start performance timer for scoring calculation
     const endTimer = performanceLoggingService.startTimer('scoring_calculation');
     
     try {
       scoringMessage = JSON.parse(message);
 
-      // Get answer from Redis hash (O(1) lookup)
+      console.log('[Scoring Service] Processing scoring message:', {
+        answerId: scoringMessage!.answerId,
+        participantId: scoringMessage!.participantId,
+        questionId: scoringMessage!.questionId,
+      });
+
+      // Get answer from Redis buffer
       const answer = await this.getAnswerFromBuffer(
         scoringMessage!.sessionId,
         scoringMessage!.answerId
       );
 
       if (!answer) {
+        console.error('[Scoring Service] Answer not found in buffer:', scoringMessage!.answerId);
         return;
       }
 
-      // Get question details (cached after first fetch per round)
+      // Get question details from MongoDB
       const question = await this.getQuestion(scoringMessage!.sessionId, scoringMessage!.questionId);
 
       if (!question) {
-        return;
-      }
-
-      // Fetch participant session ONCE and pass through
-      const participantSession = await redisDataStructuresService.getParticipantSession(
-        scoringMessage!.participantId
-      );
-
-      if (!participantSession) {
+        console.error('[Scoring Service] Question not found:', scoringMessage!.questionId);
         return;
       }
 
@@ -247,23 +279,25 @@ class ScoringService {
         scoringMessage!.participantId,
         scoringMessage!.sessionId,
         scoringMessage!.answerId,
-        scoringMessage!.questionId,
-        participantSession
+        scoringMessage!.questionId
       );
 
       // Update participant score in Redis
       await this.updateParticipantScore(
         scoringMessage!.participantId,
         scoringMessage!.sessionId,
-        scoreCalculation,
-        participantSession
+        scoreCalculation
       );
 
-      // Update leaderboard in Redis (reuse participantSession after score update)
+      // Update leaderboard in Redis
       await this.updateLeaderboard(
         scoringMessage!.participantId,
         scoringMessage!.sessionId
       );
+
+      // Fire-and-forget MongoDB score sync (best-effort, non-blocking)
+      // Ensures MongoDB has a reasonably recent score as fallback if Redis data is lost
+      this.syncScoreToMongoDB(scoringMessage!.participantId);
 
       // Add answer to batch for MongoDB persistence
       const enrichedAnswer: Answer = {
@@ -278,27 +312,38 @@ class ScoringService {
 
       this.answerBatch.push(enrichedAnswer);
 
+      // Flush batch if size limit reached
       if (this.answerBatch.length >= this.BATCH_SIZE) {
         await this.flushAnswerBatch();
       }
 
-      // Broadcast answer result + score update in parallel (fire-and-forget)
-      Promise.all([
-        this.broadcastAnswerResult(
-          scoringMessage!.participantId,
-          scoringMessage!.questionId,
-          scoreCalculation
-        ),
-        this.broadcastScoreUpdate(
-          scoringMessage!.participantId,
-          scoringMessage!.sessionId
-        ),
-      ]).catch(() => { /* ignore broadcast errors */ });
+      // Broadcast answer result to participant (for personal result display)
+      await this.broadcastAnswerResult(
+        scoringMessage!.participantId,
+        scoringMessage!.questionId,
+        scoreCalculation
+      );
+
+      // Broadcast score update to participant
+      await this.broadcastScoreUpdate(
+        scoringMessage!.participantId,
+        scoringMessage!.sessionId
+      );
+
+      console.log('[Scoring Service] Score calculation completed:', {
+        answerId: scoringMessage!.answerId,
+        participantId: scoringMessage!.participantId,
+        totalPoints: scoreCalculation.totalPoints,
+        isCorrect: scoreCalculation.isCorrect,
+      });
       
+      // End performance timer
       endTimer();
     } catch (error) {
+      // End performance timer even on error
       endTimer();
       
+      // Log error with full context for debugging (Requirement 17.4)
       const errorContext: ScoreCalculationErrorContext = {
         participantId: scoringMessage?.participantId ?? 'unknown',
         questionId: scoringMessage?.questionId ?? 'unknown',
@@ -310,6 +355,7 @@ class ScoringService {
       };
       
       console.error('[Scoring] Error processing scoring message:', errorContext);
+      // Don't throw - continue processing other messages (Requirement 17.4)
     }
   }
 
@@ -336,22 +382,34 @@ class ScoringService {
     participantId: string,
     sessionId: string,
     answerId: string,
-    questionId: string,
-    participantSession: any
+    questionId: string
   ): Promise<ScoreCalculation> {
     try {
+      // Attempt to calculate score
       const score = await this.calculateScore(
         answer,
         question,
         participantId,
-        sessionId,
-        participantSession
+        sessionId
       );
       
+      // LRU eviction: delete first to move to end on re-insert
+      this.lastValidScores.delete(participantId);
+      
+      // Evict oldest entry if at capacity
+      if (this.lastValidScores.size >= MAX_LAST_VALID_SCORES) {
+        const oldestKey = this.lastValidScores.keys().next().value;
+        if (oldestKey !== undefined) {
+          this.lastValidScores.delete(oldestKey);
+        }
+      }
+      
+      // Store as last valid score for this participant
       this.lastValidScores.set(participantId, score);
       
       return score;
     } catch (error) {
+      // Log error with full context (Requirement 17.4)
       const errorContext: ScoreCalculationErrorContext = {
         participantId,
         questionId,
@@ -364,12 +422,19 @@ class ScoringService {
       
       console.error('[Scoring] Error calculating score:', errorContext);
       
+      // Return last valid score or default score (Requirement 17.4)
       const lastValidScore = this.lastValidScores.get(participantId);
       
       if (lastValidScore) {
+        console.log('[Scoring] Using last valid score for participant:', {
+          participantId,
+          lastValidScore: lastValidScore.totalPoints,
+        });
         return lastValidScore;
       }
       
+      // Return zero score if no previous valid score exists
+      console.log('[Scoring] No previous valid score, returning zero score for participant:', participantId);
       return {
         basePoints: 0,
         speedBonus: 0,
@@ -383,27 +448,25 @@ class ScoringService {
   }
 
   /**
-   * Get answer from Redis hash (O(1) lookup).
-   * Falls back to list scan if hash entry not found (backward compat).
+   * Get answer from Redis buffer
+   * 
+   * @param sessionId - Session ID
+   * @param answerId - Answer ID
+   * @returns Answer object or null if not found
    */
   private async getAnswerFromBuffer(
     sessionId: string,
     answerId: string
   ): Promise<any | null> {
     const redis = redisService.getClient();
-    
-    // Try O(1) hash lookup first
-    const hashKey = `session:${sessionId}:answers:hash`;
-    const answerJson = await redis.hget(hashKey, answerId);
-    if (answerJson) {
-      return JSON.parse(answerJson);
-    }
-
-    // Fallback: scan the list (for answers written before this optimization)
     const bufferKey = `session:${sessionId}:answers:buffer`;
+
+    // Get all answers from buffer
     const answers = await redis.lrange(bufferKey, 0, -1);
-    for (const json of answers) {
-      const answer = JSON.parse(json);
+
+    // Find the answer with matching ID
+    for (const answerJson of answers) {
+      const answer = JSON.parse(answerJson);
       if (answer.answerId === answerId) {
         return answer;
       }
@@ -413,8 +476,11 @@ class ScoringService {
   }
 
   /**
-   * Get question details from MongoDB (cached per round).
-   * Same question is fetched once and reused for all 100+ participants.
+   * Get question details from MongoDB
+   * 
+   * @param sessionId - Session ID
+   * @param questionId - Question ID
+   * @returns Question object or null if not found
    */
   private async getQuestion(
     sessionId: string,
@@ -427,17 +493,31 @@ class ScoringService {
     try {
       const db = mongodbService.getDb();
       const sessionsCollection = db.collection('sessions');
+
+      // Get session to find quiz ID
       const session = await sessionsCollection.findOne({ sessionId });
 
-      if (!session) return null;
+      if (!session) {
+        console.error('[Scoring Service] Session not found:', sessionId);
+        return null;
+      }
 
+      // Get quiz with questions
       const quizzesCollection = db.collection('quizzes');
       const quiz = await quizzesCollection.findOne({ _id: session.quizId });
 
-      if (!quiz) return null;
+      if (!quiz) {
+        console.error('[Scoring Service] Quiz not found:', session.quizId);
+        return null;
+      }
 
+      // Find question in quiz
       const question = quiz.questions.find((q: Question) => q.questionId === questionId);
-      if (!question) return null;
+
+      if (!question) {
+        console.error('[Scoring Service] Question not found in quiz:', questionId);
+        return null;
+      }
 
       // Cache for this round
       this.questionCache.set(cacheKey, question);
@@ -469,8 +549,7 @@ class ScoringService {
     answer: any,
     question: Question,
     participantId: string,
-    sessionId: string,
-    participantSession: any
+    sessionId: string
   ): Promise<ScoreCalculation> {
     // Get correct options
     const correctOptions = question.options
@@ -514,8 +593,7 @@ class ScoringService {
       streakBonus = await this.calculateStreakBonus(
         participantId,
         sessionId,
-        question.scoring.basePoints,
-        participantSession
+        question.scoring.basePoints
       );
     } else {
       // Reset streak on wrong answer
@@ -530,8 +608,7 @@ class ScoringService {
       negativeDeduction = await this.calculateNegativeDeduction(
         sessionId,
         participantId,
-        question.scoring.basePoints,
-        participantSession
+        question.scoring.basePoints
       );
     }
 
@@ -671,24 +748,33 @@ class ScoringService {
   private async calculateStreakBonus(
     participantId: string,
     _sessionId: string,
-    basePoints: number,
-    participantSession: any
+    basePoints: number
   ): Promise<number> {
     try {
+      // Get current streak count from Redis
+      const participantSession = await redisDataStructuresService.getParticipantSession(
+        participantId
+      );
+
       if (!participantSession) {
         return 0;
       }
 
       const currentStreak = participantSession.streakCount || 0;
+
+      // Increment streak count
       const newStreak = currentStreak + 1;
 
+      // Update streak count in Redis
       await redisDataStructuresService.updateParticipantStreak(participantId, newStreak);
 
+      // Calculate streak bonus (only after first correct answer)
       if (newStreak <= 1) {
-        return 0;
+        return 0; // No bonus for first correct answer
       }
 
       const streakBonus = basePoints * 0.1 * (newStreak - 1);
+
       return Math.round(streakBonus);
     } catch (error) {
       console.error('[Scoring Service] Error calculating streak bonus:', error);
@@ -716,47 +802,65 @@ class ScoringService {
    */
   private async calculateNegativeDeduction(
     sessionId: string,
-    _participantId: string,
-    basePoints: number,
-    participantSession: any
+    participantId: string,
+    basePoints: number
   ): Promise<number> {
     try {
-      // Check exam mode cache first
-      let examMode = this.examModeCache.get(sessionId);
-      
-      if (!examMode) {
-        // Fetch from MongoDB and cache
-        const db = mongodbService.getDb();
-        const sessionsCollection = db.collection('sessions');
-        const session = await sessionsCollection.findOne({ sessionId });
+      // Get session to check exam mode configuration
+      const db = mongodbService.getDb();
+      const sessionsCollection = db.collection('sessions');
+      const session = await sessionsCollection.findOne({ sessionId });
 
-        if (!session || !session.examMode || !session.examMode.negativeMarkingEnabled) {
-          this.examModeCache.set(sessionId, { negativeMarkingEnabled: false, negativeMarkingPercentage: 0 });
-          return 0;
-        }
-
-        examMode = {
-          negativeMarkingEnabled: session.examMode.negativeMarkingEnabled,
-          negativeMarkingPercentage: session.examMode.negativeMarkingPercentage || 0,
-        };
-        this.examModeCache.set(sessionId, examMode);
-      }
-
-      if (!examMode.negativeMarkingEnabled || examMode.negativeMarkingPercentage <= 0) {
+      if (!session) {
+        console.error('[Scoring Service] Session not found for negative marking:', sessionId);
         return 0;
       }
 
-      const deduction = Math.floor(basePoints * examMode.negativeMarkingPercentage / 100);
+      // Check if negative marking is enabled
+      const examMode = session.examMode;
+      if (!examMode || !examMode.negativeMarkingEnabled) {
+        return 0; // Negative marking not enabled
+      }
+
+      const negativeMarkingPercentage = examMode.negativeMarkingPercentage || 0;
+      if (negativeMarkingPercentage <= 0) {
+        return 0; // No deduction if percentage is 0 or negative
+      }
+
+      // Calculate deduction: basePoints × negativeMarkingPercentage / 100
+      // Requirement 12.3
+      const deduction = Math.floor(basePoints * negativeMarkingPercentage / 100);
+
+      // Get current participant score to ensure we don't go below zero
+      // Requirement 12.4
+      const participantSession = await redisDataStructuresService.getParticipantSession(
+        participantId
+      );
 
       if (!participantSession) {
-        return deduction;
+        return deduction; // Return full deduction, floor will be applied in updateParticipantScore
       }
 
       const currentScore = participantSession.totalScore || 0;
-      return Math.min(deduction, currentScore);
+
+      // Cap deduction so score doesn't go below zero
+      // Requirement 12.4: Ensure participant scores do not go below zero
+      const cappedDeduction = Math.min(deduction, currentScore);
+
+      console.log('[Scoring Service] Calculated negative marking deduction:', {
+        sessionId,
+        participantId,
+        basePoints,
+        negativeMarkingPercentage,
+        calculatedDeduction: deduction,
+        currentScore,
+        cappedDeduction,
+      });
+
+      return cappedDeduction;
     } catch (error) {
       console.error('[Scoring Service] Error calculating negative deduction:', error);
-      return 0;
+      return 0; // Return 0 on error to avoid penalizing participant
     }
   }
 
@@ -764,33 +868,143 @@ class ScoringService {
    * Update participant score in Redis
    * 
    * Ensures score never goes below zero (Requirement 12.4)
+   * When the participant session has expired, attempts to restore it from
+   * MongoDB and the Redis leaderboard sorted set before giving up.
+   * 
+   * Requirements: 2.2, 2.4, 3.2, 3.5
    * 
    * @param participantId - Participant ID
+   * @param sessionId - Session ID
    * @param scoreCalculation - Score calculation breakdown
    */
   private async updateParticipantScore(
     participantId: string,
-    _sessionId: string,
-    scoreCalculation: ScoreCalculation,
-    participantSession: any
+    sessionId: string,
+    scoreCalculation: ScoreCalculation
   ): Promise<void> {
     try {
       const redis = redisService.getClient();
       const participantKey = `participant:${participantId}:session`;
 
+      // Get current score
+      let participantSession = await redisDataStructuresService.getParticipantSession(
+        participantId
+      );
+
       if (!participantSession) {
-        return;
+        // Session expired — attempt to restore from MongoDB and leaderboard
+        console.warn('[Scoring Service] Participant session expired, attempting restoration:', participantId);
+
+        const restored = await this.restoreParticipantSession(participantId, sessionId);
+        if (!restored) {
+          console.error('[Scoring Service] Failed to restore participant session:', participantId);
+          return;
+        }
+
+        // Re-fetch the restored session
+        participantSession = await redisDataStructuresService.getParticipantSession(participantId);
+        if (!participantSession) {
+          console.error('[Scoring Service] Participant session not found after restoration:', participantId);
+          return;
+        }
+
+        console.log('[Scoring Service] Participant session restored successfully:', {
+          participantId,
+          restoredScore: participantSession.totalScore,
+        });
       }
 
       const currentScore = participantSession.totalScore || 0;
+
+      // Calculate new score and ensure it doesn't go below zero (Requirement 12.4)
       const newScore = Math.max(0, currentScore + scoreCalculation.totalPoints);
 
+      // Update participant score in Redis
       await redis.hset(participantKey, {
         totalScore: newScore.toString(),
         lastQuestionScore: scoreCalculation.totalPoints.toString(),
       });
+
+      console.log('[Scoring Service] Updated participant score:', {
+        participantId,
+        oldScore: currentScore,
+        newScore,
+        pointsAdded: scoreCalculation.totalPoints,
+        negativeDeduction: scoreCalculation.negativeDeduction,
+      });
     } catch (error) {
       console.error('[Scoring Service] Error updating participant score:', error);
+    }
+  }
+
+  /**
+   * Restore a participant's Redis session from MongoDB and the leaderboard sorted set.
+   * 
+   * When a participant's Redis session expires during an active quiz, this method
+   * reconstructs it using the best available data:
+   * 1. Query MongoDB participants collection for participant data
+   * 2. Check the Redis leaderboard sorted set for the last known score
+   * 3. Use Math.max(mongoScore, leaderboardDerivedScore) as the restored totalScore
+   * 4. Recreate the Redis session and set the 30-min active quiz TTL
+   * 
+   * @param participantId - Participant ID to restore
+   * @param sessionId - Session ID for leaderboard lookup
+   * @returns true if restoration succeeded, false otherwise
+   */
+  private async restoreParticipantSession(
+    participantId: string,
+    sessionId: string
+  ): Promise<boolean> {
+    try {
+      // Query MongoDB for participant data
+      const participantsCollection = mongodbService.getCollection('participants');
+      const mongoParticipant = await participantsCollection.findOne({ participantId, sessionId });
+
+      if (!mongoParticipant) {
+        console.error('[Scoring Service] Participant not found in MongoDB for restoration:', participantId);
+        return false;
+      }
+
+      // Check the Redis leaderboard sorted set for the participant's last known score
+      const leaderboardKey = `session:${sessionId}:leaderboard`;
+      const leaderboardScoreStr = await redisService.getClient().zscore(leaderboardKey, participantId);
+
+      let leaderboardDerivedScore = 0;
+      if (leaderboardScoreStr !== null) {
+        // Leaderboard score formula: totalScore - totalTimeMs / 1e9
+        // Math.floor avoids inflating scores (Issue #7)
+        leaderboardDerivedScore = Math.floor(parseFloat(leaderboardScoreStr));
+      }
+
+      // Use the best available score
+      const restoredTotalScore = Math.max(mongoParticipant.totalScore || 0, leaderboardDerivedScore);
+
+      // Recreate the Redis participant session
+      await redisDataStructuresService.setParticipantSession(participantId, {
+        sessionId,
+        nickname: mongoParticipant.nickname,
+        totalScore: restoredTotalScore,
+        totalTimeMs: mongoParticipant.totalTimeMs || 0,
+        streakCount: mongoParticipant.streakCount || 0,
+        isActive: mongoParticipant.isActive !== false,
+        isEliminated: mongoParticipant.isEliminated || false,
+      });
+
+      // Set the 30-min active quiz TTL instead of the default 5-min
+      await redisDataStructuresService.refreshParticipantSessionForActiveQuiz(participantId);
+
+      console.log('[Scoring Service] Restored participant session from MongoDB/leaderboard:', {
+        participantId,
+        sessionId,
+        mongoScore: mongoParticipant.totalScore || 0,
+        leaderboardDerivedScore,
+        restoredTotalScore,
+      });
+
+      return true;
+    } catch (error) {
+      console.error('[Scoring Service] Error restoring participant session:', error);
+      return false;
     }
   }
 
@@ -813,23 +1027,168 @@ class ScoringService {
       const redis = redisService.getClient();
       const leaderboardKey = `session:${sessionId}:leaderboard`;
 
-      // Re-fetch participant session to get updated score after updateParticipantScore
+      // Get participant score and time
       const participantSession = await redisDataStructuresService.getParticipantSession(
         participantId
       );
 
       if (!participantSession) {
+        console.error('[Scoring Service] Participant session not found:', participantId);
         return;
       }
 
       const totalScore = participantSession.totalScore || 0;
       const totalTimeMs = participantSession.totalTimeMs || 0;
+
+      // Calculate leaderboard score with tie-breaker
+      // Higher score = better, lower time = better
+      // Formula: totalScore - (totalTimeMs / 1000000000)
       const leaderboardScore = totalScore - totalTimeMs / 1000000000;
 
+      // Update leaderboard sorted set
       await redis.zadd(leaderboardKey, leaderboardScore, participantId);
+
+      console.log('[Scoring Service] Updated leaderboard:', {
+        participantId,
+        totalScore,
+        totalTimeMs,
+        leaderboardScore,
+      });
     } catch (error) {
       console.error('[Scoring Service] Error updating leaderboard:', error);
     }
+  }
+
+  /**
+   * Fire-and-forget sync of participant score to MongoDB
+   * 
+   * Updates the MongoDB participant record with the current totalScore and totalTimeMs
+   * from Redis. This ensures MongoDB always has a reasonably recent score, making it
+   * a viable fallback if Redis data is lost.
+   * 
+   * Uses fire-and-forget pattern to avoid blocking the scoring pipeline.
+   * On failure, pushes to a Redis retry queue for later retry (Issue #6).
+   * 
+   * @param participantId - Participant ID to sync
+   */
+  private syncScoreToMongoDB(participantId: string): void {
+    redisDataStructuresService.getParticipantSession(participantId)
+      .then((participantSession) => {
+        if (!participantSession) {
+          return;
+        }
+
+        const totalScore = participantSession.totalScore || 0;
+        const totalTimeMs = participantSession.totalTimeMs || 0;
+
+        const participantsCollection = mongodbService.getCollection('participants');
+        return participantsCollection.updateOne(
+          { participantId },
+          { $set: { totalScore, totalTimeMs } }
+        ).then(() => {
+          // Success — no action needed
+        }).catch(async (error) => {
+          // Push to retry queue on failure (Issue #6)
+          console.error('[Scoring Service] Error syncing score to MongoDB, queuing for retry:', {
+            participantId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+
+          const retryItem: SyncRetryItem = {
+            participantId,
+            totalScore,
+            totalTimeMs,
+            timestamp: Date.now(),
+            retryCount: 0,
+          };
+
+          try {
+            const redis = redisService.getClient();
+            await redis.lpush(SYNC_RETRY_KEY, JSON.stringify(retryItem));
+          } catch (redisError) {
+            console.error('[Scoring Service] Failed to push sync retry item to Redis:', {
+              participantId,
+              error: redisError instanceof Error ? redisError.message : String(redisError),
+            });
+          }
+        });
+      })
+      .catch(async (error) => {
+        console.error('[Scoring Service] Error syncing score to MongoDB (fire-and-forget):', {
+          participantId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }
+
+  /**
+   * Start the sync retry worker (Issue #6)
+   * 
+   * Every 30 seconds, pops items from the Redis retry list and retries the MongoDB update.
+   * On failure, re-pushes with incremented retryCount. Max 5 retries.
+   */
+  private startSyncRetryWorker(): void {
+    this.syncRetryInterval = setInterval(async () => {
+      try {
+        const redis = redisService.getClient();
+        const length = await redis.llen(SYNC_RETRY_KEY);
+
+        if (length === 0) {
+          return;
+        }
+
+        console.log('[Scoring Service] Sync retry worker processing:', { queueLength: length });
+
+        // Process up to 50 items per cycle to avoid blocking
+        const itemsToProcess = Math.min(length, 50);
+
+        for (let i = 0; i < itemsToProcess; i++) {
+          const itemJson = await redis.rpop(SYNC_RETRY_KEY);
+          if (!itemJson) break;
+
+          let item: SyncRetryItem;
+          try {
+            item = JSON.parse(itemJson);
+          } catch {
+            console.error('[Scoring Service] Invalid sync retry item, discarding:', itemJson);
+            continue;
+          }
+
+          try {
+            const participantsCollection = mongodbService.getCollection('participants');
+            await participantsCollection.updateOne(
+              { participantId: item.participantId },
+              { $set: { totalScore: item.totalScore, totalTimeMs: item.totalTimeMs } }
+            );
+
+            console.log('[Scoring Service] Sync retry succeeded:', {
+              participantId: item.participantId,
+              retryCount: item.retryCount,
+            });
+          } catch (error) {
+            // Re-push with incremented retryCount if under max
+            if (item.retryCount < SYNC_RETRY_MAX) {
+              item.retryCount++;
+              await redis.lpush(SYNC_RETRY_KEY, JSON.stringify(item));
+              console.warn('[Scoring Service] Sync retry failed, re-queued:', {
+                participantId: item.participantId,
+                retryCount: item.retryCount,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            } else {
+              console.error('[Scoring Service] Sync retry exhausted max retries, discarding:', {
+                participantId: item.participantId,
+                retryCount: item.retryCount,
+              });
+            }
+          }
+        }
+      } catch (error) {
+        console.error('[Scoring Service] Sync retry worker error:', error);
+      }
+    }, SYNC_RETRY_INTERVAL_MS);
+
+    console.log('[Scoring Service] Sync retry worker started');
   }
 
   /**
@@ -861,6 +1220,14 @@ class ScoringService {
           totalPoints: scoreCalculation.totalPoints,
         }
       );
+
+      console.log('[Scoring Service] Broadcasted answer result:', {
+        participantId,
+        questionId,
+        isCorrect: scoreCalculation.isCorrect,
+        negativeDeduction: scoreCalculation.negativeDeduction,
+        totalPoints: scoreCalculation.totalPoints,
+      });
     } catch (error) {
       console.error('[Scoring Service] Error broadcasting answer result:', error);
     }
@@ -881,33 +1248,41 @@ class ScoringService {
     sessionId: string
   ): Promise<void> {
     try {
+      // Get participant score and rank
       const participantSession = await redisDataStructuresService.getParticipantSession(
         participantId
       );
 
       if (!participantSession) {
+        console.error('[Scoring Service] Participant session not found:', participantId);
         return;
       }
 
+      // Get rank from leaderboard
       const redis = redisService.getClient();
       const leaderboardKey = `session:${sessionId}:leaderboard`;
       
-      const [rank, totalParticipants] = await Promise.all([
-        redis.zrevrank(leaderboardKey, participantId),
-        redis.zcard(leaderboardKey),
-      ]);
+      const rank = await redis.zrevrank(leaderboardKey, participantId);
+      const totalParticipants = await redis.zcard(leaderboardKey);
 
+      // Broadcast score update to participant
       await pubSubService.publishToParticipant(
         participantId,
         'score_updated',
         {
           participantId,
           totalScore: participantSession.totalScore || 0,
-          rank: rank !== null ? rank + 1 : null,
+          rank: rank !== null ? rank + 1 : null, // Convert 0-based to 1-based
           totalParticipants,
           streakCount: participantSession.streakCount || 0,
         }
       );
+
+      console.log('[Scoring Service] Broadcasted score update:', {
+        participantId,
+        totalScore: participantSession.totalScore,
+        rank: rank !== null ? rank + 1 : null,
+      });
     } catch (error) {
       console.error('[Scoring Service] Error broadcasting score update:', error);
     }
@@ -987,13 +1362,19 @@ class ScoringService {
       this.batchFlushInterval = null;
     }
 
+    // Stop the sync retry worker (Issue #6)
+    if (this.syncRetryInterval) {
+      clearInterval(this.syncRetryInterval);
+      this.syncRetryInterval = null;
+      console.log('[Scoring Service] Sync retry worker stopped');
+    }
+
     // Flush remaining answers
     await this.flushAnswerBatch();
 
     // Clear last valid scores cache
     this.lastValidScores.clear();
-    this.questionCache.clear();
-    this.examModeCache.clear();
+    console.log('[Scoring Service] Cleared last valid scores cache');
 
     console.log('[Scoring Service] Scoring worker stopped');
   }

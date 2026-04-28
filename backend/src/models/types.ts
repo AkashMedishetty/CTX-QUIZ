@@ -84,6 +84,7 @@ export interface Quiz {
   description: string;
   quizType: QuizType;
   createdBy: string; // admin user ID
+  organizationId?: string; // references organizations (SaaS multi-tenancy)
   createdAt: Date;
   updatedAt: Date;
   branding: Branding;
@@ -121,6 +122,7 @@ export interface Session {
   sessionId: string; // UUID
   quizId: ObjectId;
   joinCode: string; // 6-character code
+  organizationId?: string; // inherited from parent quiz (SaaS multi-tenancy)
   state: SessionState;
   currentQuestionIndex: number;
   currentQuestionStartTime?: Date;

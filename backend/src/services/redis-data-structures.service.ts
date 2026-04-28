@@ -13,11 +13,13 @@
  */
 
 import { redisService } from './redis.service';
+import { mongodbService } from './mongodb.service';
 
 // TTL constants (in seconds)
 const TTL = {
   SESSION_STATE: 6 * 60 * 60, // 6 hours
-  PARTICIPANT_SESSION: 5 * 60, // 5 minutes
+  PARTICIPANT_SESSION: 5 * 60, // 5 minutes (disconnection/reconnection window)
+  PARTICIPANT_SESSION_ACTIVE: 30 * 60, // 30 minutes (participants in an active quiz)
   LEADERBOARD: 6 * 60 * 60, // 6 hours
   ANSWER_BUFFER: 60 * 60, // 1 hour
   JOIN_CODE: 6 * 60 * 60, // 6 hours
@@ -320,6 +322,41 @@ class RedisDataStructuresService {
     const client = redisService.getClient();
     const key = `participant:${participantId}:session`;
     await client.expire(key, TTL.PARTICIPANT_SESSION);
+  }
+
+  /**
+   * Refresh a single participant's TTL to the longer quiz-active TTL (30 min)
+   * Used when a quiz is actively in progress to prevent session expiration
+   */
+  async refreshParticipantSessionForActiveQuiz(participantId: string): Promise<void> {
+    const client = redisService.getClient();
+    const key = `participant:${participantId}:session`;
+    await client.expire(key, TTL.PARTICIPANT_SESSION_ACTIVE);
+  }
+
+  /**
+   * Refresh Redis TTL for all active participants in a quiz session
+   * Queries MongoDB for active participants and sets each one's TTL to PARTICIPANT_SESSION_ACTIVE (30 min)
+   * Called on quiz lifecycle events (question start, reveal) to keep sessions alive
+   */
+  async refreshAllParticipantSessionsForQuiz(sessionId: string): Promise<void> {
+    try {
+      const participantsCollection = mongodbService.getCollection('participants');
+      const activeParticipants = await participantsCollection
+        .find({ sessionId, isActive: true })
+        .project({ participantId: 1 })
+        .toArray();
+
+      const client = redisService.getClient();
+      const refreshPromises = activeParticipants.map((p) => {
+        const key = `participant:${p.participantId}:session`;
+        return client.expire(key, TTL.PARTICIPANT_SESSION_ACTIVE);
+      });
+
+      await Promise.all(refreshPromises);
+    } catch (error) {
+      console.error(`[RedisDataStructures] Failed to refresh participant sessions for session ${sessionId}:`, error);
+    }
   }
 
   /**

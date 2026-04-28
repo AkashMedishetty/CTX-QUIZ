@@ -15,6 +15,7 @@
  */
 
 import { redisDataStructuresService, SessionState, ParticipantSession } from './redis-data-structures.service';
+import { redisService } from './redis.service';
 import { mongodbService } from './mongodb.service';
 import { performanceLoggingService } from './performance-logging.service';
 import { Question, Session, Participant, LeaderboardEntry } from '../models/types';
@@ -311,6 +312,33 @@ class SessionRecoveryService {
         };
       }
 
+      // Cross-validate: explicitly verify participant belongs to the claimed session (Issue #13)
+      if (mongoParticipant.sessionId !== sessionId) {
+        console.log('[Session Recovery] Participant session mismatch in MongoDB fallback:', {
+          participantId,
+          expectedSessionId: sessionId,
+          actualSessionId: mongoParticipant.sessionId,
+        });
+        return {
+          success: false,
+          reason: 'PARTICIPANT_NOT_FOUND',
+          message: 'Participant not found in this session. Please rejoin with the join code.',
+        };
+      }
+
+      // Cross-validate: verify participant is active (Issue #13)
+      if (mongoParticipant.isActive === false) {
+        console.log('[Session Recovery] Participant is not active in MongoDB fallback:', {
+          participantId,
+          sessionId,
+        });
+        return {
+          success: false,
+          reason: 'PARTICIPANT_NOT_FOUND',
+          message: 'Participant is no longer active. Please rejoin with the join code.',
+        };
+      }
+
       // Check if participant is banned
       if (mongoParticipant.isBanned) {
         console.log('[Session Recovery] Participant is banned:', participantId);
@@ -342,10 +370,40 @@ class SessionRecoveryService {
 
       // Restore participant session to Redis from MongoDB
       // This handles the case where Redis was restarted or data was evicted
+      // Also check the Redis leaderboard sorted set for a more recent score
+      // (leaderboard has its own 6-hour TTL independent of participant session TTL)
+      let leaderboardDerivedScore = 0;
+      try {
+        const leaderboardKey = `session:${sessionId}:leaderboard`;
+        const leaderboardScoreStr = await redisService.getClient().zscore(leaderboardKey, participantId);
+        if (leaderboardScoreStr !== null) {
+          // Leaderboard score formula: totalScore - totalTimeMs/1e9
+          // Math.floor avoids inflating scores (Issue #7)
+          leaderboardDerivedScore = Math.floor(parseFloat(leaderboardScoreStr));
+        }
+      } catch (error) {
+        console.warn('[Session Recovery] Failed to get leaderboard score for participant:', {
+          participantId,
+          sessionId,
+          error: error instanceof Error ? error.message : error,
+        });
+      }
+
+      const mongoScore = mongoParticipant.totalScore || 0;
+      const bestScore = Math.max(mongoScore, leaderboardDerivedScore);
+
+      console.warn('[Session Recovery] Score recovery sources:', {
+        participantId,
+        sessionId,
+        mongoScore,
+        leaderboardDerivedScore,
+        bestScore,
+      });
+
       const restoredSession: ParticipantSession = {
         sessionId: mongoParticipant.sessionId,
         nickname: mongoParticipant.nickname,
-        totalScore: mongoParticipant.totalScore,
+        totalScore: bestScore,
         totalTimeMs: mongoParticipant.totalTimeMs,
         streakCount: mongoParticipant.streakCount,
         isActive: true, // Restore as active

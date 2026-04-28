@@ -3,10 +3,12 @@
  * 
  * Provides authentication for Socket.IO connections:
  * - Verifies participant tokens using JWT
+ * - Verifies authenticated user JWTs (controller/admin roles)
  * - Verifies session existence for controller and big screen roles
  * - Stores authenticated data in socket.data (participantId, sessionId, role)
+ * - Emits token_expired event when user JWT expires during active session
  * 
- * Requirements: 9.8
+ * Requirements: 9.8, 19.3, 19.4, 19.5, 19.6
  */
 
 import { Socket } from 'socket.io';
@@ -14,15 +16,22 @@ import jwt from 'jsonwebtoken';
 import { config } from '../config';
 import { mongodbService } from '../services/mongodb.service';
 import { redisService } from '../services/redis.service';
+import type { OrgRole } from '../models/saas-types';
 
 /**
  * Socket data interface for authenticated connections
+ * Supports both participant tokens and authenticated user JWTs
  */
 export interface SocketData {
   participantId?: string;
   sessionId: string;
   role: 'participant' | 'controller' | 'bigscreen';
   nickname?: string;
+  // Authenticated user fields (set when user JWT is used)
+  isAuthenticatedUser?: boolean;
+  userId?: string;
+  email?: string;
+  memberships?: Array<{ organizationId: string; role: OrgRole }>;
 }
 
 /**
@@ -35,6 +44,17 @@ interface ParticipantTokenPayload {
 }
 
 /**
+ * JWT payload interface for authenticated user tokens
+ */
+interface UserTokenPayload {
+  userId: string;
+  email: string;
+  memberships: Array<{ organizationId: string; role: string }>;
+  iat?: number;
+  exp?: number;
+}
+
+/**
  * Authentication handshake data from client
  */
 interface AuthHandshake {
@@ -42,6 +62,43 @@ interface AuthHandshake {
   sessionId?: string;
   joinCode?: string;
   role?: string;
+}
+
+/**
+ * Type guard: checks if a decoded JWT payload is a user token
+ */
+function isUserPayload(payload: Record<string, unknown>): boolean {
+  return (
+    typeof payload.userId === 'string' &&
+    typeof payload.email === 'string' &&
+    Array.isArray(payload.memberships)
+  );
+}
+
+/**
+ * Set up a timer to emit 'token_expired' when the user JWT expires.
+ * The timer fires slightly before actual expiry to give the client time to refresh.
+ *
+ * Requirements: 19.6
+ */
+function setupTokenExpiryTimer(socket: Socket, exp: number): void {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const remainingMs = (exp - nowSeconds) * 1000;
+
+  if (remainingMs <= 0) {
+    // Token already expired — emit immediately
+    socket.emit('token_expired');
+    return;
+  }
+
+  const timer = setTimeout(() => {
+    socket.emit('token_expired');
+  }, remainingMs);
+
+  // Clean up timer when socket disconnects
+  socket.on('disconnect', () => {
+    clearTimeout(timer);
+  });
 }
 
 /**
@@ -90,6 +147,12 @@ export async function socketAuthMiddleware(
       
       case 'controller':
       case 'bigscreen':
+        // If a token is provided, try authenticated user flow first
+        if (token) {
+          const handled = await tryAuthenticateUser(socket, token, sessionId, joinCode, role as 'controller' | 'bigscreen', next);
+          if (handled) break;
+        }
+        // Fall back to existing session-based viewer auth
         await authenticateViewer(socket, sessionId, joinCode, role as 'controller' | 'bigscreen', next);
         break;
       
@@ -276,6 +339,115 @@ async function authenticateParticipant(
     console.error('[Socket Auth] Participant authentication error:', error);
     return next(new Error('Authentication failed'));
   }
+}
+
+/**
+ * Try to authenticate a controller/bigscreen connection using a user JWT.
+ * Returns true if the token was a valid user JWT (auth handled — either success or error).
+ * Returns false if the token is not a user JWT, so the caller should fall back to viewer auth.
+ *
+ * Requirements: 19.3, 19.4, 19.5, 19.6
+ */
+async function tryAuthenticateUser(
+  socket: Socket,
+  token: string,
+  sessionId: string | undefined,
+  joinCode: string | undefined,
+  role: 'controller' | 'bigscreen',
+  next: (err?: Error) => void
+): Promise<boolean> {
+  const { securityLoggingService } = await import('../services/security-logging.service');
+
+  let decoded: Record<string, unknown>;
+  try {
+    decoded = jwt.verify(token, config.jwt.secret) as Record<string, unknown>;
+  } catch (error: unknown) {
+    const jwtError = error as { name?: string; message?: string };
+
+    if (jwtError.name === 'TokenExpiredError') {
+      // Could be an expired user JWT — try decoding without verification to check shape
+      try {
+        const unverified = jwt.decode(token) as Record<string, unknown> | null;
+        if (unverified && isUserPayload(unverified)) {
+          // It was a user JWT that expired
+          await securityLoggingService.logAuthenticationFailure({
+            reason: 'EXPIRED_TOKEN',
+            role,
+            socketId: socket.id,
+            ipAddress: socket.handshake.address,
+            message: 'User token expired',
+          });
+          next(new Error('Token expired'));
+          return true;
+        }
+      } catch {
+        // Decode failed — not a user JWT
+      }
+    }
+
+    // Not a user JWT or some other error — let caller fall back
+    return false;
+  }
+
+  // Check if this is a user JWT (has userId/email/memberships)
+  if (!isUserPayload(decoded)) {
+    // Not a user JWT — let caller fall back to viewer auth
+    return false;
+  }
+
+  const userPayload = decoded as unknown as UserTokenPayload;
+
+  // It's a valid user JWT — resolve session
+  let resolvedSessionId = sessionId;
+
+  if (!resolvedSessionId && joinCode) {
+    const redis = redisService.getClient();
+    const lookupSessionId = await redis.get(`joincode:${joinCode.toUpperCase()}`);
+    if (lookupSessionId) {
+      resolvedSessionId = lookupSessionId;
+    }
+  }
+
+  if (!resolvedSessionId) {
+    next(new Error('Missing session ID or invalid join code'));
+    return true;
+  }
+
+  // Verify session exists
+  const sessionExists = await verifySessionExists(resolvedSessionId);
+  if (!sessionExists) {
+    next(new Error('Session not found or ended'));
+    return true;
+  }
+
+  // Attach user + org context to socket.data
+  socket.data = {
+    sessionId: resolvedSessionId,
+    role,
+    isAuthenticatedUser: true,
+    userId: userPayload.userId,
+    email: userPayload.email,
+    memberships: (userPayload.memberships || []).map((m) => ({
+      organizationId: m.organizationId,
+      role: m.role as OrgRole,
+    })),
+  } as SocketData;
+
+  // Set up token expiry timer (Requirements: 19.6)
+  if (userPayload.exp) {
+    setupTokenExpiryTimer(socket, userPayload.exp);
+  }
+
+  console.log('[Socket Auth] Authenticated user connected:', {
+    socketId: socket.id,
+    userId: userPayload.userId,
+    email: userPayload.email,
+    sessionId: resolvedSessionId,
+    role,
+  });
+
+  next();
+  return true;
 }
 
 /**

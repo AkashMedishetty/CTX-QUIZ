@@ -16,7 +16,7 @@ import { SocketData } from '../middleware/socket-auth';
 import { redisService } from '../services/redis.service';
 import { mongodbService } from '../services/mongodb.service';
 import { redisDataStructuresService } from '../services/redis-data-structures.service';
-import { broadcastService, systemMetricsBroadcastManager } from '../services/broadcast.service';
+import { broadcastService, systemMetricsBroadcastManager, LEADERBOARD_PAGE_SIZE } from '../services/broadcast.service';
 import { pubSubService } from '../services/pubsub.service';
 import { quizTimerManager } from '../services/quiz-timer.service';
 import { scoringService } from '../services/scoring.service';
@@ -83,7 +83,7 @@ export async function handleControllerConnection(socket: Socket): Promise<void> 
     console.error('[Controller Handler] Error handling controller connection:', error);
     
     socket.emit('auth_error', {
-      error: 'Failed to authenticate controller',
+      error: 'An error occurred',
     });
     
     socket.disconnect(true);
@@ -132,6 +132,9 @@ export async function handleControllerDisconnection(
     console.error('[Controller Handler] Error logging disconnection event:', error);
     // Continue - logging failure shouldn't prevent disconnection
   }
+
+  // Clean up all event listeners to prevent memory leaks (Issue #8)
+  socket.removeAllListeners();
 
   console.log('[Controller Handler] Controller disconnection handled:', {
     socketId: socket.id,
@@ -331,7 +334,7 @@ async function handleStartQuiz(
     if (data.sessionId !== authenticatedSessionId) {
       socket.emit('error', {
         event: 'start_quiz',
-        error: 'Session ID mismatch',
+        error: 'An error occurred',
       });
       return;
     }
@@ -344,7 +347,7 @@ async function handleStartQuiz(
     if (!session) {
       socket.emit('error', {
         event: 'start_quiz',
-        error: 'Session not found',
+        error: 'An error occurred',
       });
       return;
     }
@@ -357,7 +360,7 @@ async function handleStartQuiz(
     if (currentState !== 'LOBBY') {
       socket.emit('error', {
         event: 'start_quiz',
-        error: `Cannot start quiz from ${currentState} state`,
+        error: 'An error occurred',
       });
       return;
     }
@@ -369,7 +372,7 @@ async function handleStartQuiz(
     if (!quiz) {
       socket.emit('error', {
         event: 'start_quiz',
-        error: 'Quiz not found',
+        error: 'An error occurred',
       });
       return;
     }
@@ -377,7 +380,7 @@ async function handleStartQuiz(
     if (!quiz.questions || quiz.questions.length === 0) {
       socket.emit('error', {
         event: 'start_quiz',
-        error: 'Quiz has no questions',
+        error: 'An error occurred',
       });
       return;
     }
@@ -463,7 +466,7 @@ async function handleStartQuiz(
     
     socket.emit('error', {
       event: 'start_quiz',
-      error: 'Failed to start quiz',
+      error: 'An error occurred',
     });
   }
 }
@@ -501,7 +504,7 @@ async function handleNextQuestion(
     if (data.sessionId !== authenticatedSessionId) {
       socket.emit('error', {
         event: 'next_question',
-        error: 'Session ID mismatch',
+        error: 'An error occurred',
       });
       return;
     }
@@ -514,7 +517,7 @@ async function handleNextQuestion(
     if (!session) {
       socket.emit('error', {
         event: 'next_question',
-        error: 'Session not found',
+        error: 'An error occurred',
       });
       return;
     }
@@ -537,12 +540,9 @@ async function handleNextQuestion(
       : ['REVEAL'];
 
     if (!validStates.includes(currentState)) {
-      const stateRequirement = (isExamModeSkipReveal || isExamModeAutoAdvance)
-        ? 'REVEAL or ACTIVE_QUESTION' 
-        : 'REVEAL';
       socket.emit('error', {
         event: 'next_question',
-        error: `Cannot advance to next question from ${currentState} state. Must be in ${stateRequirement} state.`,
+        error: 'An error occurred',
       });
       return;
     }
@@ -566,7 +566,7 @@ async function handleNextQuestion(
     if (!quiz) {
       socket.emit('error', {
         event: 'next_question',
-        error: 'Quiz not found',
+        error: 'An error occurred',
       });
       return;
     }
@@ -668,6 +668,18 @@ async function handleNextQuestion(
         // Continue - cleanup can happen later
       }
 
+      // Clean up focus tracking Redis keys for all participants (Issue #16)
+      try {
+        const redis = redisService.getClient();
+        for (const p of participants) {
+          await redis.del(`participant:${p.participantId}:focus`);
+        }
+        console.log('[Controller Handler] Cleaned up focus keys for participants:', participants.length);
+      } catch (error) {
+        console.error('[Controller Handler] Error cleaning up focus keys:', error);
+        // Continue - cleanup failure shouldn't prevent quiz end
+      }
+
       // Send acknowledgment to controller
       socket.emit('next_question_ack', {
         success: true,
@@ -743,7 +755,7 @@ async function handleNextQuestion(
     
     socket.emit('error', {
       event: 'next_question',
-      error: 'Failed to advance to next question',
+      error: 'An error occurred',
     });
   }
 }
@@ -782,7 +794,7 @@ async function handleEndQuiz(
     if (data.sessionId !== authenticatedSessionId) {
       socket.emit('error', {
         event: 'end_quiz',
-        error: 'Session ID mismatch',
+        error: 'An error occurred',
       });
       return;
     }
@@ -795,7 +807,7 @@ async function handleEndQuiz(
     if (!session) {
       socket.emit('error', {
         event: 'end_quiz',
-        error: 'Session not found',
+        error: 'An error occurred',
       });
       return;
     }
@@ -808,7 +820,7 @@ async function handleEndQuiz(
     if (currentState === 'ENDED') {
       socket.emit('error', {
         event: 'end_quiz',
-        error: 'Quiz has already ended',
+        error: 'An error occurred',
       });
       return;
     }
@@ -922,6 +934,18 @@ async function handleEndQuiz(
       },
     });
 
+    // Clean up focus tracking Redis keys for all participants (Issue #16)
+    try {
+      const redis = redisService.getClient();
+      for (const p of participants) {
+        await redis.del(`participant:${p.participantId}:focus`);
+      }
+      console.log('[Controller Handler] Cleaned up focus keys for participants:', participants.length);
+    } catch (error) {
+      console.error('[Controller Handler] Error cleaning up focus keys:', error);
+      // Continue - cleanup failure shouldn't prevent quiz end
+    }
+
     // Send acknowledgment to controller
     socket.emit('end_quiz_ack', {
       success: true,
@@ -938,7 +962,7 @@ async function handleEndQuiz(
     
     socket.emit('error', {
       event: 'end_quiz',
-      error: 'Failed to end quiz',
+      error: 'An error occurred',
     });
   }
 }
@@ -978,7 +1002,7 @@ async function handleVoidQuestion(
     if (data.sessionId !== authenticatedSessionId) {
       socket.emit('error', {
         event: 'void_question',
-        error: 'Session ID mismatch',
+        error: 'An error occurred',
       });
       return;
     }
@@ -987,7 +1011,7 @@ async function handleVoidQuestion(
     if (!data.questionId) {
       socket.emit('error', {
         event: 'void_question',
-        error: 'Question ID is required',
+        error: 'An error occurred',
       });
       return;
     }
@@ -995,7 +1019,7 @@ async function handleVoidQuestion(
     if (!data.reason || data.reason.trim().length === 0) {
       socket.emit('error', {
         event: 'void_question',
-        error: 'Reason for voiding is required',
+        error: 'An error occurred',
       });
       return;
     }
@@ -1008,7 +1032,7 @@ async function handleVoidQuestion(
     if (!session) {
       socket.emit('error', {
         event: 'void_question',
-        error: 'Session not found',
+        error: 'An error occurred',
       });
       return;
     }
@@ -1020,7 +1044,7 @@ async function handleVoidQuestion(
     if (!quiz) {
       socket.emit('error', {
         event: 'void_question',
-        error: 'Quiz not found',
+        error: 'An error occurred',
       });
       return;
     }
@@ -1030,7 +1054,7 @@ async function handleVoidQuestion(
     if (!question) {
       socket.emit('error', {
         event: 'void_question',
-        error: 'Question not found in quiz',
+        error: 'An error occurred',
       });
       return;
     }
@@ -1040,7 +1064,7 @@ async function handleVoidQuestion(
     if (currentVoidedQuestions.includes(data.questionId)) {
       socket.emit('error', {
         event: 'void_question',
-        error: 'Question is already voided',
+        error: 'An error occurred',
       });
       return;
     }
@@ -1312,7 +1336,7 @@ async function handleVoidQuestion(
 
     socket.emit('error', {
       event: 'void_question',
-      error: 'Failed to void question',
+      error: 'An error occurred',
     });
   }
 }
@@ -1349,7 +1373,7 @@ async function handleSkipQuestion(
     if (data.sessionId !== authenticatedSessionId) {
       socket.emit('error', {
         event: 'skip_question',
-        error: 'Session ID mismatch',
+        error: 'An error occurred',
       });
       return;
     }
@@ -1360,7 +1384,7 @@ async function handleSkipQuestion(
     if (!redisState) {
       socket.emit('error', {
         event: 'skip_question',
-        error: 'Session state not found',
+        error: 'An error occurred',
       });
       return;
     }
@@ -1369,7 +1393,7 @@ async function handleSkipQuestion(
     if (redisState.state !== 'ACTIVE_QUESTION') {
       socket.emit('error', {
         event: 'skip_question',
-        error: `Cannot skip question in ${redisState.state} state. Must be in ACTIVE_QUESTION state.`,
+        error: 'An error occurred',
       });
       return;
     }
@@ -1381,7 +1405,7 @@ async function handleSkipQuestion(
     if (!currentQuestionId) {
       socket.emit('error', {
         event: 'skip_question',
-        error: 'No active question found',
+        error: 'An error occurred',
       });
       return;
     }
@@ -1452,7 +1476,7 @@ async function handleSkipQuestion(
       if (!quiz) {
         socket.emit('error', {
           event: 'skip_question',
-          error: 'Quiz not found',
+          error: 'An error occurred',
         });
         return;
       }
@@ -1602,7 +1626,7 @@ async function handleSkipQuestion(
 
     socket.emit('error', {
       event: 'skip_question',
-      error: 'Failed to skip question',
+      error: 'An error occurred',
     });
   }
 }
@@ -1642,7 +1666,7 @@ async function handlePauseTimer(
     if (data.sessionId !== authenticatedSessionId) {
       socket.emit('error', {
         event: 'pause_timer',
-        error: 'Session ID mismatch',
+        error: 'An error occurred',
       });
       return;
     }
@@ -1653,7 +1677,7 @@ async function handlePauseTimer(
     if (!redisState) {
       socket.emit('error', {
         event: 'pause_timer',
-        error: 'Session state not found',
+        error: 'An error occurred',
       });
       return;
     }
@@ -1662,7 +1686,7 @@ async function handlePauseTimer(
     if (redisState.state !== 'ACTIVE_QUESTION') {
       socket.emit('error', {
         event: 'pause_timer',
-        error: `Cannot pause timer in ${redisState.state} state. Must be in ACTIVE_QUESTION state.`,
+        error: 'An error occurred',
       });
       return;
     }
@@ -1672,7 +1696,7 @@ async function handlePauseTimer(
     if (!currentQuestionId) {
       socket.emit('error', {
         event: 'pause_timer',
-        error: 'No active question found',
+        error: 'An error occurred',
       });
       return;
     }
@@ -1682,7 +1706,7 @@ async function handlePauseTimer(
     if (!timer) {
       socket.emit('error', {
         event: 'pause_timer',
-        error: 'Timer not found for current question',
+        error: 'An error occurred',
       });
       return;
     }
@@ -1691,7 +1715,7 @@ async function handlePauseTimer(
     if (!timer.getIsRunning()) {
       socket.emit('error', {
         event: 'pause_timer',
-        error: 'Timer is not running',
+        error: 'An error occurred',
       });
       return;
     }
@@ -1764,7 +1788,7 @@ async function handlePauseTimer(
 
     socket.emit('error', {
       event: 'pause_timer',
-      error: 'Failed to pause timer',
+      error: 'An error occurred',
     });
   }
 }
@@ -1803,7 +1827,7 @@ async function handleResumeTimer(
     if (data.sessionId !== authenticatedSessionId) {
       socket.emit('error', {
         event: 'resume_timer',
-        error: 'Session ID mismatch',
+        error: 'An error occurred',
       });
       return;
     }
@@ -1814,7 +1838,7 @@ async function handleResumeTimer(
     if (!redisState) {
       socket.emit('error', {
         event: 'resume_timer',
-        error: 'Session state not found',
+        error: 'An error occurred',
       });
       return;
     }
@@ -1823,7 +1847,7 @@ async function handleResumeTimer(
     if (redisState.state !== 'ACTIVE_QUESTION') {
       socket.emit('error', {
         event: 'resume_timer',
-        error: `Cannot resume timer in ${redisState.state} state. Must be in ACTIVE_QUESTION state.`,
+        error: 'An error occurred',
       });
       return;
     }
@@ -1833,7 +1857,7 @@ async function handleResumeTimer(
     if (!currentQuestionId) {
       socket.emit('error', {
         event: 'resume_timer',
-        error: 'No active question found',
+        error: 'An error occurred',
       });
       return;
     }
@@ -1845,7 +1869,7 @@ async function handleResumeTimer(
     if (!timerState || timerState.isPaused !== 'true') {
       socket.emit('error', {
         event: 'resume_timer',
-        error: 'Timer is not paused',
+        error: 'An error occurred',
       });
       return;
     }
@@ -1855,7 +1879,7 @@ async function handleResumeTimer(
     if (!timer) {
       socket.emit('error', {
         event: 'resume_timer',
-        error: 'Timer not found for current question',
+        error: 'An error occurred',
       });
       return;
     }
@@ -1866,7 +1890,7 @@ async function handleResumeTimer(
     if (remainingSeconds <= 0) {
       socket.emit('error', {
         event: 'resume_timer',
-        error: 'Timer has already expired',
+        error: 'An error occurred',
       });
       return;
     }
@@ -1938,7 +1962,7 @@ async function handleResumeTimer(
 
     socket.emit('error', {
       event: 'resume_timer',
-      error: 'Failed to resume timer',
+      error: 'An error occurred',
     });
   }
 }
@@ -1979,7 +2003,7 @@ async function handleResetTimer(
     if (data.sessionId !== authenticatedSessionId) {
       socket.emit('error', {
         event: 'reset_timer',
-        error: 'Session ID mismatch',
+        error: 'An error occurred',
       });
       return;
     }
@@ -1988,7 +2012,7 @@ async function handleResetTimer(
     if (!data.newTimeLimit || typeof data.newTimeLimit !== 'number') {
       socket.emit('error', {
         event: 'reset_timer',
-        error: 'New time limit is required',
+        error: 'An error occurred',
       });
       return;
     }
@@ -1996,7 +2020,7 @@ async function handleResetTimer(
     if (data.newTimeLimit < 5 || data.newTimeLimit > 120) {
       socket.emit('error', {
         event: 'reset_timer',
-        error: 'New time limit must be between 5 and 120 seconds',
+        error: 'An error occurred',
       });
       return;
     }
@@ -2007,7 +2031,7 @@ async function handleResetTimer(
     if (!redisState) {
       socket.emit('error', {
         event: 'reset_timer',
-        error: 'Session state not found',
+        error: 'An error occurred',
       });
       return;
     }
@@ -2016,7 +2040,7 @@ async function handleResetTimer(
     if (redisState.state !== 'ACTIVE_QUESTION') {
       socket.emit('error', {
         event: 'reset_timer',
-        error: `Cannot reset timer in ${redisState.state} state. Must be in ACTIVE_QUESTION state.`,
+        error: 'An error occurred',
       });
       return;
     }
@@ -2026,7 +2050,7 @@ async function handleResetTimer(
     if (!currentQuestionId) {
       socket.emit('error', {
         event: 'reset_timer',
-        error: 'No active question found',
+        error: 'An error occurred',
       });
       return;
     }
@@ -2036,7 +2060,7 @@ async function handleResetTimer(
     if (!timer) {
       socket.emit('error', {
         event: 'reset_timer',
-        error: 'Timer not found for current question',
+        error: 'An error occurred',
       });
       return;
     }
@@ -2117,7 +2141,7 @@ async function handleResetTimer(
 
     socket.emit('error', {
       event: 'reset_timer',
-      error: 'Failed to reset timer',
+      error: 'An error occurred',
     });
   }
 }
@@ -2158,7 +2182,7 @@ async function handleKickParticipant(
     if (data.sessionId !== authenticatedSessionId) {
       socket.emit('error', {
         event: 'kick_participant',
-        error: 'Session ID mismatch',
+        error: 'An error occurred',
       });
       return;
     }
@@ -2167,7 +2191,7 @@ async function handleKickParticipant(
     if (!data.participantId) {
       socket.emit('error', {
         event: 'kick_participant',
-        error: 'Participant ID is required',
+        error: 'An error occurred',
       });
       return;
     }
@@ -2175,7 +2199,7 @@ async function handleKickParticipant(
     if (!data.reason || data.reason.trim().length === 0) {
       socket.emit('error', {
         event: 'kick_participant',
-        error: 'Reason for kicking is required',
+        error: 'An error occurred',
       });
       return;
     }
@@ -2188,7 +2212,7 @@ async function handleKickParticipant(
     if (!session) {
       socket.emit('error', {
         event: 'kick_participant',
-        error: 'Session not found',
+        error: 'An error occurred',
       });
       return;
     }
@@ -2203,7 +2227,7 @@ async function handleKickParticipant(
     if (!participant) {
       socket.emit('error', {
         event: 'kick_participant',
-        error: 'Participant not found in this session',
+        error: 'An error occurred',
       });
       return;
     }
@@ -2212,7 +2236,7 @@ async function handleKickParticipant(
     if (!participant.isActive) {
       socket.emit('error', {
         event: 'kick_participant',
-        error: 'Participant is already inactive',
+        error: 'An error occurred',
       });
       return;
     }
@@ -2383,7 +2407,7 @@ async function handleKickParticipant(
 
     socket.emit('error', {
       event: 'kick_participant',
-      error: 'Failed to kick participant',
+      error: 'An error occurred',
     });
   }
 }
@@ -2425,7 +2449,7 @@ async function handleBanParticipant(
     if (data.sessionId !== authenticatedSessionId) {
       socket.emit('error', {
         event: 'ban_participant',
-        error: 'Session ID mismatch',
+        error: 'An error occurred',
       });
       return;
     }
@@ -2434,7 +2458,7 @@ async function handleBanParticipant(
     if (!data.participantId) {
       socket.emit('error', {
         event: 'ban_participant',
-        error: 'Participant ID is required',
+        error: 'An error occurred',
       });
       return;
     }
@@ -2442,7 +2466,7 @@ async function handleBanParticipant(
     if (!data.reason || data.reason.trim().length === 0) {
       socket.emit('error', {
         event: 'ban_participant',
-        error: 'Reason for banning is required',
+        error: 'An error occurred',
       });
       return;
     }
@@ -2455,7 +2479,7 @@ async function handleBanParticipant(
     if (!session) {
       socket.emit('error', {
         event: 'ban_participant',
-        error: 'Session not found',
+        error: 'An error occurred',
       });
       return;
     }
@@ -2470,7 +2494,7 @@ async function handleBanParticipant(
     if (!participant) {
       socket.emit('error', {
         event: 'ban_participant',
-        error: 'Participant not found in this session',
+        error: 'An error occurred',
       });
       return;
     }
@@ -2479,7 +2503,7 @@ async function handleBanParticipant(
     if (participant.isBanned) {
       socket.emit('error', {
         event: 'ban_participant',
-        error: 'Participant is already banned',
+        error: 'An error occurred',
       });
       return;
     }
@@ -2670,7 +2694,7 @@ async function handleBanParticipant(
 
     socket.emit('error', {
       event: 'ban_participant',
-      error: 'Failed to ban participant',
+      error: 'An error occurred',
     });
   }
 }
@@ -2703,7 +2727,7 @@ async function handleToggleLateJoiners(
     if (data.sessionId !== authenticatedSessionId) {
       socket.emit('error', {
         event: 'toggle_late_joiners',
-        error: 'Session ID mismatch',
+        error: 'An error occurred',
       });
       return;
     }
@@ -2720,7 +2744,7 @@ async function handleToggleLateJoiners(
     if (result.matchedCount === 0) {
       socket.emit('error', {
         event: 'toggle_late_joiners',
-        error: 'Session not found',
+        error: 'An error occurred',
       });
       return;
     }
@@ -2746,7 +2770,120 @@ async function handleToggleLateJoiners(
 
     socket.emit('error', {
       event: 'toggle_late_joiners',
-      error: 'Failed to toggle late joiners setting',
+      error: 'An error occurred',
+    });
+  }
+}
+
+/**
+ * Handle request_leaderboard_page event from controller
+ * 
+ * Returns a specific page of the leaderboard from the Redis sorted set.
+ * 
+ * Requirements: 2.13 (Issue #10 — Leaderboard Pagination)
+ * 
+ * @param socket - Socket.IO socket instance
+ * @param data - Event data containing sessionId and page number
+ */
+async function handleRequestLeaderboardPage(
+  socket: Socket,
+  data: { sessionId: string; page: number }
+): Promise<void> {
+  const socketData = socket.data as SocketData;
+  const { sessionId: authenticatedSessionId } = socketData;
+
+  try {
+    console.log('[Controller Handler] Handling request_leaderboard_page event:', {
+      socketId: socket.id,
+      sessionId: data.sessionId,
+      page: data.page,
+    });
+
+    // Verify sessionId matches authenticated session
+    if (data.sessionId !== authenticatedSessionId) {
+      socket.emit('error', {
+        event: 'request_leaderboard_page',
+        error: 'An error occurred',
+      });
+      return;
+    }
+
+    const page = Math.max(1, Math.floor(data.page || 1));
+    const pageSize = LEADERBOARD_PAGE_SIZE;
+    const offset = (page - 1) * pageSize;
+
+    const redis = redisService.getClient();
+    const leaderboardKey = `session:${data.sessionId}:leaderboard`;
+
+    // Get total count
+    const totalCount = await redis.zcard(leaderboardKey);
+
+    // Get the requested page using ZREVRANGE with offset
+    const entries = await redis.zrevrange(leaderboardKey, offset, offset + pageSize - 1, 'WITHSCORES');
+
+    const leaderboard: Array<{
+      rank: number;
+      participantId: string;
+      nickname: string;
+      totalScore: number;
+      streakCount: number;
+      totalTimeMs: number;
+    }> = [];
+
+    for (let i = 0; i < entries.length; i += 2) {
+      const participantId = entries[i];
+      const leaderboardScore = parseFloat(entries[i + 1]);
+
+      const participantSession = await redisDataStructuresService.getParticipantSession(participantId);
+
+      if (participantSession) {
+        leaderboard.push({
+          rank: offset + Math.floor(i / 2) + 1,
+          participantId,
+          nickname: participantSession.nickname,
+          totalScore: participantSession.totalScore || 0,
+          streakCount: participantSession.streakCount || 0,
+          totalTimeMs: participantSession.totalTimeMs || 0,
+        });
+      } else {
+        // Fallback to MongoDB
+        const db = mongodbService.getDb();
+        const participantsCollection = db.collection<Participant>('participants');
+        const participant = await participantsCollection.findOne({ participantId });
+
+        if (participant) {
+          leaderboard.push({
+            rank: offset + Math.floor(i / 2) + 1,
+            participantId,
+            nickname: participant.nickname,
+            totalScore: participant.totalScore || Math.floor(leaderboardScore),
+            streakCount: 0,
+            totalTimeMs: participant.totalTimeMs || 0,
+          });
+        }
+      }
+    }
+
+    socket.emit('leaderboard_page', {
+      leaderboard,
+      totalCount,
+      page,
+      pageSize,
+      hasMore: offset + pageSize < totalCount,
+    });
+
+    console.log('[Controller Handler] Sent leaderboard page:', {
+      sessionId: data.sessionId,
+      page,
+      entriesInPage: leaderboard.length,
+      totalCount,
+    });
+  } catch (error) {
+    console.error('[Controller Handler] Error handling request_leaderboard_page:', error);
+
+    socket.emit('error', {
+      event: 'request_leaderboard_page',
+      error: 'An error occurred',
     });
   }
 }
@@ -2819,6 +2956,11 @@ function setupControllerEventHandlers(socket: Socket): void {
   // Handle toggle_late_joiners event
   socket.on('toggle_late_joiners', async (data: { sessionId: string; allowLateJoiners: boolean }) => {
     await handleToggleLateJoiners(socket, data);
+  });
+
+  // Handle request_leaderboard_page event (Issue #10 — Leaderboard Pagination)
+  socket.on('request_leaderboard_page', async (data: { sessionId: string; page: number }) => {
+    await handleRequestLeaderboardPage(socket, data);
   });
 
   console.log('[Controller Handler] Event handlers set up for controller:', {

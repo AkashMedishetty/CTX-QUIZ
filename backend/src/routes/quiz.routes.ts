@@ -16,6 +16,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { mongodbService } from '../services';
 import { createQuizRequestSchema, updateQuizRequestSchema, questionCreateSchema, updateQuestionRequestSchema, validateAndSanitizeRequest } from '../models/validation';
 import { Quiz } from '../models/types';
+import { optionalAuth, AuthenticatedRequest } from '../middleware/auth';
+import { organizationContext, OrganizationContextRequest } from '../middleware/organization-context';
 
 const router = Router();
 
@@ -42,10 +44,31 @@ const router = Router();
  */
 router.post(
   '/',
+  optionalAuth,
   validateAndSanitizeRequest(createQuizRequestSchema),
   async (req: Request, res: Response) => {
     try {
       const validatedData = (req as any).validatedBody;
+
+      // Resolve org context if authenticated
+      let organizationId: string | undefined;
+      const authReq = req as AuthenticatedRequest;
+      if (authReq.user) {
+        try {
+          await new Promise<void>((resolve, reject) => {
+            organizationContext(authReq, res as any, (err?: any) => {
+              if (err) return reject(err);
+              resolve();
+            });
+          });
+          // If organizationContext sent a response (error), stop here
+          if (res.headersSent) return;
+          organizationId = (req as OrganizationContextRequest).organization?.organizationId;
+        } catch {
+          // org context resolution failed, response already sent
+          if (res.headersSent) return;
+        }
+      }
 
       // Generate unique IDs for questions and options if not provided
       // Handle case where questions array might be empty or undefined
@@ -63,7 +86,8 @@ router.post(
         title: validatedData.title,
         description: validatedData.description,
         quizType: validatedData.quizType,
-        createdBy: 'admin', // TODO: Replace with actual user ID from authentication
+        createdBy: authReq.user?.userId || 'admin',
+        organizationId,
         createdAt: new Date(),
         updatedAt: new Date(),
         branding: validatedData.branding,
@@ -129,7 +153,7 @@ router.post(
  * 
  * Validates: Requirements 1.1
  */
-router.get('/', async (req: Request, res: Response) => {
+router.get('/', optionalAuth, async (req: Request, res: Response) => {
   try {
     // Parse and validate query parameters
     const page = Math.max(1, parseInt(req.query.page as string) || 1);
@@ -141,6 +165,26 @@ router.get('/', async (req: Request, res: Response) => {
 
     // Build search filter
     const filter: any = {};
+
+    // Scope to organization if authenticated
+    const authReq = req as AuthenticatedRequest;
+    if (authReq.user) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          organizationContext(authReq, res as any, (err?: any) => {
+            if (err) return reject(err);
+            resolve();
+          });
+        });
+        if (res.headersSent) return;
+        const orgReq = req as OrganizationContextRequest;
+        if (orgReq.organization) {
+          filter.organizationId = orgReq.organization.organizationId;
+        }
+      } catch {
+        if (res.headersSent) return;
+      }
+    }
     if (search) {
       // Case-insensitive search on title and description
       filter.$or = [
@@ -314,6 +358,7 @@ router.get('/:quizId', async (req: Request, res: Response): Promise<void> => {
  */
 router.put(
   '/:quizId',
+  optionalAuth,
   validateAndSanitizeRequest(updateQuizRequestSchema),
   async (req: Request, res: Response): Promise<void> => {
     try {
@@ -348,6 +393,32 @@ router.put(
           message: `No quiz found with ID: ${quizId}`,
         });
         return;
+      }
+
+      // Verify org ownership if authenticated
+      const authReq = req as AuthenticatedRequest;
+      if (authReq.user) {
+        try {
+          await new Promise<void>((resolve, reject) => {
+            organizationContext(authReq, res as any, (err?: any) => {
+              if (err) return reject(err);
+              resolve();
+            });
+          });
+          if (res.headersSent) return;
+          const orgReq = req as OrganizationContextRequest;
+          if (orgReq.organization && existingQuiz.organizationId &&
+              existingQuiz.organizationId !== orgReq.organization.organizationId) {
+            res.status(403).json({
+              success: false,
+              error: 'Access denied',
+              message: 'This quiz belongs to a different organization',
+            });
+            return;
+          }
+        } catch {
+          if (res.headersSent) return;
+        }
       }
 
       // Generate IDs for new questions and options if provided
@@ -442,7 +513,7 @@ router.put(
  * 
  * Validates: Requirements 1.1
  */
-router.delete('/:quizId', async (req: Request, res: Response): Promise<void> => {
+router.delete('/:quizId', optionalAuth, async (req: Request, res: Response): Promise<void> => {
   try {
     const { quizId } = req.params;
 
@@ -476,6 +547,32 @@ router.delete('/:quizId', async (req: Request, res: Response): Promise<void> => 
         message: `No quiz found with ID: ${quizId}`,
       });
       return;
+    }
+
+    // Verify org ownership if authenticated
+    const authReq = req as AuthenticatedRequest;
+    if (authReq.user) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          organizationContext(authReq, res as any, (err?: any) => {
+            if (err) return reject(err);
+            resolve();
+          });
+        });
+        if (res.headersSent) return;
+        const orgReq = req as OrganizationContextRequest;
+        if (orgReq.organization && quiz.organizationId &&
+            quiz.organizationId !== orgReq.organization.organizationId) {
+          res.status(403).json({
+            success: false,
+            error: 'Access denied',
+            message: 'This quiz belongs to a different organization',
+          });
+          return;
+        }
+      } catch {
+        if (res.headersSent) return;
+      }
     }
 
     // Check for active sessions using this quiz

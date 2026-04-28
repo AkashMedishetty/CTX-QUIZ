@@ -23,6 +23,14 @@ export class MongoDBIndexesService {
         this.createParticipantsIndexes(db),
         this.createAnswersIndexes(db),
         this.createAuditLogsIndexes(db),
+        this.createUsersIndexes(db),
+        this.createOrganizationsIndexes(db),
+        this.createOrganizationMembersIndexes(db),
+        this.createInvitationsIndexes(db),
+        this.createRefreshTokensIndexes(db),
+        this.createSubscriptionsIndexes(db),
+        this.createInvoicesIndexes(db),
+        this.createPricingTiersIndexes(db),
       ]);
 
       console.log('✓ All MongoDB indexes created successfully');
@@ -46,6 +54,12 @@ export class MongoDBIndexesService {
     await collection.createIndex(
       { createdAt: -1 },
       { name: 'idx_quizzes_createdAt' }
+    );
+
+    // SaaS: organizationId index for tenant-scoped queries
+    await collection.createIndex(
+      { organizationId: 1, createdAt: -1 },
+      { name: 'idx_quizzes_organizationId_createdAt' }
     );
 
     console.log('  ✓ Created indexes for quizzes collection');
@@ -79,6 +93,12 @@ export class MongoDBIndexesService {
     await collection.createIndex(
       { createdAt: -1 },
       { name: 'idx_sessions_createdAt' }
+    );
+
+    // SaaS: organizationId index for tenant-scoped queries
+    await collection.createIndex(
+      { organizationId: 1, createdAt: -1 },
+      { name: 'idx_sessions_organizationId_createdAt' }
     );
 
     console.log('  ✓ Created indexes for sessions collection');
@@ -189,12 +209,182 @@ export class MongoDBIndexesService {
     console.log('  ✓ Created indexes for auditLogs collection');
   }
 
+  // ==========================================================================
+  // SaaS Collection Indexes
+  // ==========================================================================
+
+  /**
+   * Create indexes for users collection
+   */
+  private async createUsersIndexes(db: Db): Promise<void> {
+    const collection = db.collection('users');
+
+    await collection.createIndex(
+      { email: 1 },
+      { name: 'idx_users_email', unique: true }
+    );
+
+    await collection.createIndex(
+      { userId: 1 },
+      { name: 'idx_users_userId', unique: true }
+    );
+
+    console.log('  ✓ Created indexes for users collection');
+  }
+
+  /**
+   * Create indexes for organizations collection
+   */
+  private async createOrganizationsIndexes(db: Db): Promise<void> {
+    const collection = db.collection('organizations');
+
+    await collection.createIndex(
+      { organizationId: 1 },
+      { name: 'idx_organizations_organizationId', unique: true }
+    );
+
+    await collection.createIndex(
+      { slug: 1 },
+      { name: 'idx_organizations_slug', unique: true }
+    );
+
+    await collection.createIndex(
+      { ownerId: 1 },
+      { name: 'idx_organizations_ownerId' }
+    );
+
+    console.log('  ✓ Created indexes for organizations collection');
+  }
+
+  /**
+   * Create indexes for organization_members collection
+   */
+  private async createOrganizationMembersIndexes(db: Db): Promise<void> {
+    const collection = db.collection('organization_members');
+
+    await collection.createIndex(
+      { organizationId: 1, userId: 1 },
+      { name: 'idx_organization_members_orgId_userId', unique: true }
+    );
+
+    await collection.createIndex(
+      { userId: 1 },
+      { name: 'idx_organization_members_userId' }
+    );
+
+    console.log('  ✓ Created indexes for organization_members collection');
+  }
+
+  /**
+   * Create indexes for invitations collection
+   */
+  private async createInvitationsIndexes(db: Db): Promise<void> {
+    const collection = db.collection('invitations');
+
+    await collection.createIndex(
+      { token: 1 },
+      { name: 'idx_invitations_token', unique: true }
+    );
+
+    await collection.createIndex(
+      { email: 1, organizationId: 1 },
+      { name: 'idx_invitations_email_orgId' }
+    );
+
+    await collection.createIndex(
+      { expiresAt: 1 },
+      { name: 'idx_invitations_expiresAt', expireAfterSeconds: 0 }
+    );
+
+    console.log('  ✓ Created indexes for invitations collection');
+  }
+
+  /**
+   * Create indexes for refresh_tokens collection
+   */
+  private async createRefreshTokensIndexes(db: Db): Promise<void> {
+    const collection = db.collection('refresh_tokens');
+
+    await collection.createIndex(
+      { token: 1 },
+      { name: 'idx_refresh_tokens_token', unique: true }
+    );
+
+    await collection.createIndex(
+      { userId: 1 },
+      { name: 'idx_refresh_tokens_userId' }
+    );
+
+    await collection.createIndex(
+      { expiresAt: 1 },
+      { name: 'idx_refresh_tokens_expiresAt', expireAfterSeconds: 0 }
+    );
+
+    console.log('  ✓ Created indexes for refresh_tokens collection');
+  }
+
+  /**
+   * Create indexes for subscriptions collection
+   */
+  private async createSubscriptionsIndexes(db: Db): Promise<void> {
+    const collection = db.collection('subscriptions');
+
+    await collection.createIndex(
+      { organizationId: 1 },
+      { name: 'idx_subscriptions_organizationId' }
+    );
+
+    await collection.createIndex(
+      { razorpaySubscriptionId: 1 },
+      { name: 'idx_subscriptions_razorpaySubscriptionId', unique: true }
+    );
+
+    console.log('  ✓ Created indexes for subscriptions collection');
+  }
+
+  /**
+   * Create indexes for invoices collection
+   */
+  private async createInvoicesIndexes(db: Db): Promise<void> {
+    const collection = db.collection('invoices');
+
+    await collection.createIndex(
+      { organizationId: 1, createdAt: -1 },
+      { name: 'idx_invoices_organizationId_createdAt' }
+    );
+
+    await collection.createIndex(
+      { invoiceId: 1 },
+      { name: 'idx_invoices_invoiceId', unique: true }
+    );
+
+    console.log('  ✓ Created indexes for invoices collection');
+  }
+
+  /**
+   * Create indexes for pricing_tiers collection
+   */
+  private async createPricingTiersIndexes(db: Db): Promise<void> {
+    const collection = db.collection('pricing_tiers');
+
+    await collection.createIndex(
+      { name: 1 },
+      { name: 'idx_pricing_tiers_name', unique: true }
+    );
+
+    console.log('  ✓ Created indexes for pricing_tiers collection');
+  }
+
   /**
    * List all indexes in the database
    */
   async listIndexes(): Promise<Record<string, any[]>> {
     const db = mongodbService.getDb();
-    const collections = ['quizzes', 'sessions', 'participants', 'answers', 'auditLogs'];
+    const collections = [
+      'quizzes', 'sessions', 'participants', 'answers', 'auditLogs',
+      'users', 'organizations', 'organization_members', 'invitations',
+      'refresh_tokens', 'subscriptions', 'invoices', 'pricing_tiers',
+    ];
     const result: Record<string, any[]> = {};
 
     for (const collectionName of collections) {
@@ -211,7 +401,11 @@ export class MongoDBIndexesService {
    */
   async dropAllIndexes(): Promise<void> {
     const db = mongodbService.getDb();
-    const collections = ['quizzes', 'sessions', 'participants', 'answers', 'auditLogs'];
+    const collections = [
+      'quizzes', 'sessions', 'participants', 'answers', 'auditLogs',
+      'users', 'organizations', 'organization_members', 'invitations',
+      'refresh_tokens', 'subscriptions', 'invoices', 'pricing_tiers',
+    ];
 
     console.log('Dropping all indexes...');
 

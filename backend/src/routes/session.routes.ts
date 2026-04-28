@@ -20,6 +20,9 @@ import { createSessionRequestSchema, joinSessionRequestSchema, validateRequest, 
 import { profanityFilterService } from '../services/profanity-filter.service';
 import { rateLimiterService } from '../services/rate-limiter.service';
 import { generateParticipantToken } from '../middleware/socket-auth';
+import { optionalAuth, AuthenticatedRequest } from '../middleware/auth';
+import { organizationContext, OrganizationContextRequest } from '../middleware/organization-context';
+import { usageTrackerService } from '../services/usage-tracker.service';
 import type { Quiz, Session, Participant, QuizExamSettings, ExamModeConfig } from '../models/types';
 
 const router = Router();
@@ -123,10 +126,42 @@ export function mapExamSettingsToExamMode(
  */
 router.post(
   '/',
+  optionalAuth,
   validateRequest(createSessionRequestSchema),
   async (req: Request, res: Response): Promise<void> => {
     try {
       const { quizId } = (req as any).validatedBody;
+
+      // Resolve org context and check session limit if authenticated
+      let organizationId: string | undefined;
+      const authReq = req as AuthenticatedRequest;
+      if (authReq.user) {
+        try {
+          await new Promise<void>((resolve, reject) => {
+            organizationContext(authReq, res as any, (err?: any) => {
+              if (err) return reject(err);
+              resolve();
+            });
+          });
+          if (res.headersSent) return;
+          const orgReq = req as OrganizationContextRequest;
+          if (orgReq.organization) {
+            organizationId = orgReq.organization.organizationId;
+
+            // Check session limit for this organization
+            const limitResult = await usageTrackerService.checkSessionLimit(organizationId);
+            if (!limitResult.allowed) {
+              res.status(402).json({
+                success: false,
+                error: 'Monthly session limit reached. Please upgrade your plan.',
+              });
+              return;
+            }
+          }
+        } catch {
+          if (res.headersSent) return;
+        }
+      }
 
       // Convert quizId string to ObjectId
       let quizObjectId: ObjectId;
@@ -163,10 +198,13 @@ router.post(
       // Create session document
       const now = new Date();
       const examMode = mapExamSettingsToExamMode(quiz.examSettings);
+      // Inherit organizationId from quiz or from org context
+      const sessionOrgId = organizationId || quiz.organizationId;
       const session: Session = {
         sessionId,
         quizId: quizObjectId,
         joinCode,
+        organizationId: sessionOrgId,
         state: 'LOBBY',
         currentQuestionIndex: 0,
         participantCount: 0,
@@ -176,7 +214,7 @@ router.post(
         allowLateJoiners: true, // Default to allowing late joiners
         examMode,
         createdAt: now,
-        hostId: 'admin', // TODO: Replace with actual authenticated user ID when auth is implemented
+        hostId: authReq.user?.userId || 'admin',
       };
 
       // Store session in MongoDB
@@ -196,6 +234,11 @@ router.post(
 
       // Store join code mapping in Redis
       await redisDataStructuresService.setJoinCodeMapping(joinCode, sessionId);
+
+      // Increment session count for the organization if applicable
+      if (sessionOrgId) {
+        await usageTrackerService.incrementSessionCount(sessionOrgId);
+      }
 
       console.log(`[Session] Cached session state and join code mapping in Redis`);
 
@@ -256,7 +299,7 @@ router.post(
  * 
  * Requirements: 2.1
  */
-router.get('/', async (req: Request, res: Response): Promise<void> => {
+router.get('/', optionalAuth, async (req: Request, res: Response): Promise<void> => {
   try {
     const stateFilter = req.query.state as string | undefined;
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
@@ -265,6 +308,26 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
     const filter: any = {};
     if (stateFilter && ['LOBBY', 'ACTIVE_QUESTION', 'REVEAL', 'ENDED'].includes(stateFilter)) {
       filter.state = stateFilter;
+    }
+
+    // Scope to organization if authenticated
+    const authReq = req as AuthenticatedRequest;
+    if (authReq.user) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          organizationContext(authReq, res as any, (err?: any) => {
+            if (err) return reject(err);
+            resolve();
+          });
+        });
+        if (res.headersSent) return;
+        const orgReq = req as OrganizationContextRequest;
+        if (orgReq.organization) {
+          filter.organizationId = orgReq.organization.organizationId;
+        }
+      } catch {
+        if (res.headersSent) return;
+      }
     }
 
     // Get sessions from MongoDB, sorted by most recent first
@@ -546,7 +609,27 @@ router.post(
         return;
       }
 
-      // 6b. Check tournament elimination enforcement
+      // 6b. Check participant limit if session belongs to an organization
+      if (session.organizationId) {
+        try {
+          const participantLimitResult = await usageTrackerService.checkParticipantLimit(
+            session.organizationId,
+            sessionId,
+          );
+          if (!participantLimitResult.allowed) {
+            res.status(402).json({
+              success: false,
+              error: 'Participant limit reached for this session. Please upgrade your plan.',
+            });
+            return;
+          }
+        } catch (limitErr: any) {
+          console.warn(`[Session] Failed to check participant limit for session ${sessionId}:`, limitErr.message);
+          // Allow join to proceed if usage check fails (graceful degradation)
+        }
+      }
+
+      // 6c. Check tournament elimination enforcement
       // If this session belongs to a tournament round (not round 1), verify participant is qualified
       if (session.tournamentId && session.tournamentRoundNumber && session.tournamentRoundNumber > 1) {
         const { tournamentService } = await import('../services/tournament.service');

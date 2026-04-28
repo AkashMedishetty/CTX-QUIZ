@@ -4,9 +4,11 @@ import 'dotenv/config';
 import { createApp } from './app';
 import { mongodbService } from './services/mongodb.service';
 import { mongodbIndexesService } from './services/mongodb-indexes.service';
+import { seedPricingTiers } from './scripts/seed-pricing-tiers';
 import { redisService } from './services/redis.service';
 import { socketIOService } from './services/socketio.service';
 import { scoringService } from './services/scoring.service';
+import { systemMetricsBroadcastManager } from './services/broadcast.service';
 import { config } from './config';
 
 console.log('Live Quiz Platform - Backend Server');
@@ -24,6 +26,9 @@ async function startServer() {
 
     // Create indexes
     await mongodbIndexesService.createIndexes();
+
+    // Seed pricing tier definitions
+    await seedPricingTiers();
 
     // Get MongoDB status
     const mongoStatus = await mongodbService.getStatus();
@@ -86,6 +91,10 @@ async function shutdown() {
   console.log('\nShutting down gracefully...');
 
   try {
+    // Stop all system metrics broadcasts (Issue #9)
+    systemMetricsBroadcastManager.stopAll();
+    console.log('✓ System metrics broadcasts stopped');
+
     // Stop scoring service
     await scoringService.stop();
     console.log('✓ Scoring service stopped');

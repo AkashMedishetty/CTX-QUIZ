@@ -18,6 +18,11 @@ import { config } from '../../config';
 // Mock services
 jest.mock('../../services/mongodb.service');
 jest.mock('../../services/redis.service');
+jest.mock('../../services/security-logging.service', () => ({
+  securityLoggingService: {
+    logAuthenticationFailure: jest.fn().mockResolvedValue(undefined),
+  },
+}));
 
 describe('Socket Authentication Middleware', () => {
   let mockSocket: Partial<Socket>;
@@ -44,6 +49,7 @@ describe('Socket Authentication Middleware', () => {
     // Mock Redis client
     mockRedisClient = {
       hgetall: jest.fn(),
+      get: jest.fn(),
     };
     (redisService.getClient as jest.Mock).mockReturnValue(mockRedisClient);
 
@@ -308,7 +314,7 @@ describe('Socket Authentication Middleware', () => {
       await socketAuthMiddleware(mockSocket as Socket, mockNext);
 
       expect(mockNext).toHaveBeenCalledWith(expect.any(Error));
-      expect(mockNext.mock.calls[0][0].message).toBe('Missing session ID');
+      expect(mockNext.mock.calls[0][0].message).toBe('Missing session ID or invalid join code');
     });
 
     it('should reject controller when session does not exist', async () => {
@@ -382,7 +388,7 @@ describe('Socket Authentication Middleware', () => {
       await socketAuthMiddleware(mockSocket as Socket, mockNext);
 
       expect(mockNext).toHaveBeenCalledWith(expect.any(Error));
-      expect(mockNext.mock.calls[0][0].message).toBe('Missing session ID');
+      expect(mockNext.mock.calls[0][0].message).toBe('Missing session ID or invalid join code');
     });
   });
 
@@ -440,6 +446,256 @@ describe('Socket Authentication Middleware', () => {
       // Token should expire within configured time (6 hours default)
       const expectedExpiry = now + (6 * 60 * 60); // 6 hours
       expect(decoded.exp).toBeLessThanOrEqual(expectedExpiry + 10); // Allow 10s tolerance
+    });
+  });
+
+  describe('Authenticated User JWT (controller/bigscreen)', () => {
+    const sessionId = 'session-user-123';
+    const userId = 'user-abc-123';
+    const email = 'controller@example.com';
+    const memberships = [
+      { organizationId: 'org-1', role: 'owner' },
+      { organizationId: 'org-2', role: 'member' },
+    ];
+
+    function generateUserToken(overrides: Record<string, unknown> = {}, expiresIn: string | number = '15m'): string {
+      return jwt.sign(
+        { userId, email, memberships, ...overrides },
+        config.jwt.secret,
+        { expiresIn: expiresIn as jwt.SignOptions['expiresIn'] },
+      );
+    }
+
+    it('should authenticate controller with valid user JWT and sessionId', async () => {
+      const token = generateUserToken();
+
+      (mockSocket as any).on = jest.fn();
+      mockSocket.handshake!.auth = {
+        token,
+        sessionId,
+        role: 'controller',
+      };
+
+      // Mock session exists in Redis
+      mockRedisClient.hgetall.mockResolvedValueOnce({
+        state: 'LOBBY',
+        sessionId,
+      });
+
+      await socketAuthMiddleware(mockSocket as Socket, mockNext);
+
+      expect(mockNext).toHaveBeenCalledWith();
+      expect(mockSocket.data).toMatchObject({
+        sessionId,
+        role: 'controller',
+        isAuthenticatedUser: true,
+        userId,
+        email,
+      });
+      expect((mockSocket.data as SocketData).memberships).toHaveLength(2);
+    });
+
+    it('should authenticate bigscreen with valid user JWT and joinCode', async () => {
+      const token = generateUserToken();
+
+      (mockSocket as any).on = jest.fn();
+      mockRedisClient.get = jest.fn().mockResolvedValue(sessionId);
+      mockSocket.handshake!.auth = {
+        token,
+        joinCode: 'ABC123',
+        role: 'bigscreen',
+      };
+
+      // Mock session exists in Redis
+      mockRedisClient.hgetall.mockResolvedValueOnce({
+        state: 'LOBBY',
+        sessionId,
+      });
+
+      await socketAuthMiddleware(mockSocket as Socket, mockNext);
+
+      expect(mockNext).toHaveBeenCalledWith();
+      expect(mockSocket.data).toMatchObject({
+        sessionId,
+        role: 'bigscreen',
+        isAuthenticatedUser: true,
+        userId,
+      });
+    });
+
+    it('should reject user JWT when session does not exist', async () => {
+      const token = generateUserToken();
+
+      (mockSocket as any).on = jest.fn();
+      mockSocket.handshake!.auth = {
+        token,
+        sessionId,
+        role: 'controller',
+      };
+
+      // Mock session not found
+      mockRedisClient.hgetall.mockResolvedValueOnce({});
+      const mockCollection = { findOne: jest.fn().mockResolvedValue(null) };
+      mockDb.collection.mockReturnValue(mockCollection);
+
+      await socketAuthMiddleware(mockSocket as Socket, mockNext);
+
+      expect(mockNext).toHaveBeenCalledWith(expect.any(Error));
+      expect(mockNext.mock.calls[0][0].message).toBe('Session not found or ended');
+    });
+
+    it('should reject expired user JWT for controller', async () => {
+      const expiredToken = jwt.sign(
+        { userId, email, memberships },
+        config.jwt.secret,
+        { expiresIn: '-1h' },
+      );
+
+      mockSocket.handshake!.auth = {
+        token: expiredToken,
+        sessionId,
+        role: 'controller',
+      };
+
+      await socketAuthMiddleware(mockSocket as Socket, mockNext);
+
+      expect(mockNext).toHaveBeenCalledWith(expect.any(Error));
+      expect(mockNext.mock.calls[0][0].message).toBe('Token expired');
+    });
+
+    it('should set up token expiry timer for user JWT', async () => {
+      jest.useFakeTimers();
+
+      const token = generateUserToken({}, '10s'); // Expires in 10 seconds
+      const emitMock = jest.fn();
+      const onMock = jest.fn();
+
+      (mockSocket as any).emit = emitMock;
+      (mockSocket as any).on = onMock;
+      mockSocket.handshake!.auth = {
+        token,
+        sessionId,
+        role: 'controller',
+      };
+
+      // Mock session exists
+      mockRedisClient.hgetall.mockResolvedValueOnce({
+        state: 'LOBBY',
+        sessionId,
+      });
+
+      await socketAuthMiddleware(mockSocket as Socket, mockNext);
+
+      expect(mockNext).toHaveBeenCalledWith();
+
+      // Advance time past token expiry
+      jest.advanceTimersByTime(11000);
+
+      expect(emitMock).toHaveBeenCalledWith('token_expired');
+
+      jest.useRealTimers();
+    });
+
+    it('should fall back to session-based auth when token is not a user JWT', async () => {
+      // A participant-style token (not a user JWT) provided with controller role
+      const participantToken = generateParticipantToken('p1', sessionId, 'Nick');
+
+      mockSocket.handshake!.auth = {
+        token: participantToken,
+        sessionId,
+        role: 'controller',
+      };
+
+      // Mock session exists in Redis
+      mockRedisClient.hgetall.mockResolvedValueOnce({
+        state: 'LOBBY',
+        sessionId,
+      });
+
+      await socketAuthMiddleware(mockSocket as Socket, mockNext);
+
+      // Should fall back to viewer auth (session-based)
+      expect(mockNext).toHaveBeenCalledWith();
+      expect(mockSocket.data).toEqual({
+        sessionId,
+        role: 'controller',
+      });
+      // Should NOT have user fields
+      expect((mockSocket.data as any).isAuthenticatedUser).toBeUndefined();
+    });
+
+    it('should reject user JWT with missing sessionId and joinCode', async () => {
+      const token = generateUserToken();
+
+      (mockSocket as any).on = jest.fn();
+      mockSocket.handshake!.auth = {
+        token,
+        role: 'controller',
+        // No sessionId or joinCode
+      };
+
+      await socketAuthMiddleware(mockSocket as Socket, mockNext);
+
+      expect(mockNext).toHaveBeenCalledWith(expect.any(Error));
+      expect(mockNext.mock.calls[0][0].message).toBe('Missing session ID or invalid join code');
+    });
+
+    it('should maintain backward compatibility — controller without token uses session auth', async () => {
+      mockSocket.handshake!.auth = {
+        sessionId,
+        role: 'controller',
+      };
+
+      // Mock session exists
+      mockRedisClient.hgetall.mockResolvedValueOnce({
+        state: 'LOBBY',
+        sessionId,
+      });
+
+      await socketAuthMiddleware(mockSocket as Socket, mockNext);
+
+      expect(mockNext).toHaveBeenCalledWith();
+      expect(mockSocket.data).toEqual({
+        sessionId,
+        role: 'controller',
+      });
+    });
+
+    it('should clean up expiry timer on disconnect', async () => {
+      jest.useFakeTimers();
+
+      const token = generateUserToken({}, '30s');
+      const emitMock = jest.fn();
+      let disconnectHandler: (() => void) | undefined;
+
+      (mockSocket as any).emit = emitMock;
+      (mockSocket as any).on = jest.fn((event: string, handler: () => void) => {
+        if (event === 'disconnect') disconnectHandler = handler;
+      });
+      mockSocket.handshake!.auth = {
+        token,
+        sessionId,
+        role: 'controller',
+      };
+
+      mockRedisClient.hgetall.mockResolvedValueOnce({
+        state: 'LOBBY',
+        sessionId,
+      });
+
+      await socketAuthMiddleware(mockSocket as Socket, mockNext);
+
+      // Simulate disconnect before timer fires
+      expect(disconnectHandler).toBeDefined();
+      disconnectHandler!();
+
+      // Advance past expiry
+      jest.advanceTimersByTime(31000);
+
+      // Should NOT have emitted token_expired because we disconnected
+      expect(emitMock).not.toHaveBeenCalledWith('token_expired');
+
+      jest.useRealTimers();
     });
   });
 
