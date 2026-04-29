@@ -22,7 +22,7 @@ FROM base AS deps
 COPY package*.json ./
 
 # Install all dependencies (including devDependencies for build)
-RUN npm ci
+RUN npm install --ignore-scripts=false --production=false
 
 # =============================================================================
 # Stage 3: Build the TypeScript application
@@ -41,7 +41,7 @@ COPY . .
 RUN npm run build
 
 # Remove devDependencies after build to reduce image size
-RUN npm ci --only=production && npm cache clean --force
+RUN npm install --omit=dev --ignore-scripts && npm cache clean --force
 
 # =============================================================================
 # Stage 4: Production runtime image
