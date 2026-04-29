@@ -227,10 +227,15 @@
   /* Input base styles */
   .input-base {
     @apply neu-pressed rounded-md px-4 py-3 w-full;
-    @apply text-body placeholder:text-muted;
+    @apply text-body;
     @apply transition-all duration-fast;
     @apply focus:ring-2 focus:ring-primary focus:ring-offset-2;
+    color: var(--text-primary);
     ring-offset-color: var(--neu-bg);
+  }
+  
+  .input-base::placeholder {
+    color: var(--text-muted);
   }
   
   /* Button base styles */
