@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, type FormEvent } from 'react';
+import { Suspense, useState, useMemo, type FormEvent } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { resetPassword } from '@/lib/auth-client';
@@ -13,6 +13,14 @@ const PASSWORD_RULES = [
 ] as const;
 
 export default function ResetPasswordPage() {
+  return (
+    <Suspense fallback={<div className="text-center text-[var(--text-muted)]">Loading…</div>}>
+      <ResetPasswordForm />
+    </Suspense>
+  );
+}
+
+function ResetPasswordForm() {
   const searchParams = useSearchParams();
   const token = searchParams.get('token') ?? '';
 

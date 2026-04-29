@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, type FormEvent } from 'react';
+import { Suspense, useState, useMemo, type FormEvent } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 
@@ -14,6 +14,14 @@ const PASSWORD_RULES = [
 ] as const;
 
 export default function RegisterPage() {
+  return (
+    <Suspense fallback={<div className="text-center text-[var(--text-muted)]">Loading…</div>}>
+      <RegisterForm />
+    </Suspense>
+  );
+}
+
+function RegisterForm() {
   const searchParams = useSearchParams();
   const { register, isLoading, error, clearError } = useAuthStore();
 

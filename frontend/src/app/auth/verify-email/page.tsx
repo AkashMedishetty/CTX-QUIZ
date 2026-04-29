@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { Suspense, useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { verifyEmail, resendVerification } from '@/lib/auth-client';
@@ -8,6 +8,14 @@ import { verifyEmail, resendVerification } from '@/lib/auth-client';
 type Status = 'loading' | 'success' | 'error' | 'no-token';
 
 export default function VerifyEmailPage() {
+  return (
+    <Suspense fallback={<div className="text-center text-[var(--text-muted)]">Loading…</div>}>
+      <VerifyEmailContent />
+    </Suspense>
+  );
+}
+
+function VerifyEmailContent() {
   const searchParams = useSearchParams();
   const token = searchParams.get('token');
 
